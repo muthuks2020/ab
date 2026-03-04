@@ -37,7 +37,12 @@ const API_PREFIX = process.env.API_PREFIX || '/api/v1';
 const DEMO_MODE = process.env.DEMO_MODE === 'true';
 
 
-app.use(helmet());
+// ★ FIX: Allow MSAL popup to communicate back to parent window
+// Default helmet() sets Cross-Origin-Opener-Policy: same-origin which
+// blocks the Azure AD popup from calling window.closed
+app.use(helmet({
+  crossOriginOpenerPolicy: { policy: 'same-origin-allow-popups' },
+}));
 
 
 const corsOrigins = (process.env.CORS_ORIGINS || 'http://localhost:3000')
@@ -214,14 +219,48 @@ if (DEMO_MODE) {
     // Try to figure out role from the token
     const authHeader = req.headers.authorization || '';
     const token = authHeader.replace('Bearer ', '');
-    const roleKey = token.replace('demo-token-', '') || 'sales_rep';
+    const roleKey = token.replace('demo-token-', '').replace('demo-sso-token-', '') || 'sales_rep';
     const user = DEMO_USERS[roleKey] || DEMO_USERS.sales_rep;
 
     return res.json({ success: true, user });
   });
 
+  // ★ Demo /auth/sso-login — simulate SSO login in demo mode
+  // Without this, SSO calls fall through to real authRoutes which either
+  // crashes (jwks-rsa missing) or returns 403 (AZURE_SSO_ENABLED=false)
+  app.post(`${API_PREFIX}/auth/sso-login`, (req, res) => {
+    const { email, name, azure_oid } = req.body;
+
+    // Determine role from email (admin emails get admin role)
+    const adminEmails = (process.env.DEFAULT_ADMIN_EMAILS || 'muthu@appasamy.com,yoga@appasamy.com')
+      .split(',').map(e => e.trim().toLowerCase());
+    const isAdmin = adminEmails.includes((email || '').toLowerCase());
+    const roleKey = isAdmin ? 'admin' : (process.env.DEFAULT_SSO_ROLE || 'sales_rep');
+    const baseUser = DEMO_USERS[roleKey] || DEMO_USERS.sales_rep;
+
+    // Override with SSO user data
+    const user = {
+      ...baseUser,
+      email: email || baseUser.email,
+      fullName: name || baseUser.fullName,
+      authProvider: 'azure_ad',
+      azure_oid: azure_oid || 'demo-oid',
+    };
+
+    console.log(`[DEMO SSO] Login as "${email}" → role: ${roleKey}`);
+
+    return res.json({
+      success: true,
+      token: 'demo-sso-token-' + roleKey,
+      accessToken: 'demo-sso-token-' + roleKey,
+      refresh_token: 'demo-sso-refresh-' + roleKey,
+      user,
+    });
+  });
+
   console.log('⚠️  DEMO MODE ENABLED — Auth bypassed, any credentials accepted');
   console.log('   Login as: salesrep, tbm, abm, zbm, saleshead, admin, iolspec, eqdiag, eqsurg');
+  console.log('   SSO login also supported in demo mode');
 }
 
 

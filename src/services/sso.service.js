@@ -1,25 +1,45 @@
 /**
  * sso.service.js — Azure AD SSO Backend Service
- * @version 3.0.0 — 4-step lookup: azure_oid → employee_code → email → auto-provision
  *
+ * 4-step lookup: azure_oid → employee_code → email → auto-provision
  * Token validation uses JWKS public keys (no client secret needed).
  * Employee code comes from Azure AD phone_number claim (domain convention).
+ *
+ * ★ SAFE REQUIRE: If jwks-rsa is not installed, the server still starts.
+ *   validateAzureToken will throw a clear error at runtime instead of
+ *   crashing the entire backend at startup.
+ *
+ * @version 3.1.0
  */
 
 const jwt = require('jsonwebtoken');
-const jwksClient = require('jwks-rsa');
 const azureConfig = require('../config/azure-ad');
 const db = require('../config/database');
+
+// ★ Safe require — don't crash the server if jwks-rsa isn't installed
+let jwksClient;
+try {
+  jwksClient = require('jwks-rsa');
+} catch (err) {
+  console.warn('[SSO] jwks-rsa package not installed. SSO token validation will not work.');
+  console.warn('[SSO] Run: npm install jwks-rsa');
+  jwksClient = null;
+}
 
 let jwksClientInstance = null;
 
 function getJwksClient() {
+  if (!jwksClient) {
+    throw new Error(
+      'jwks-rsa package is not installed. Run: npm install jwks-rsa'
+    );
+  }
   if (!jwksClientInstance) {
     jwksClientInstance = jwksClient({
       jwksUri: azureConfig.JWKS_URI,
       cache: true,
       cacheMaxEntries: 5,
-      cacheMaxAge: 600000,
+      cacheMaxAge: 600000, // 10 minutes
     });
   }
   return jwksClientInstance;
@@ -34,6 +54,11 @@ function getSigningKey(header) {
   });
 }
 
+/**
+ * Validate Azure AD ID token using JWKS public keys.
+ * @param {string} idToken — Raw JWT from MSAL popup
+ * @returns {object} Decoded claims
+ */
 async function validateAzureToken(idToken) {
   if (!idToken) throw new Error('No token provided');
 
@@ -51,6 +76,13 @@ async function validateAzureToken(idToken) {
   return claims;
 }
 
+/**
+ * 4-step user lookup/create:
+ *   Step 1: azure_oid → returning SSO user
+ *   Step 2: employee_code (from phone_number claim) → link existing user
+ *   Step 3: email → link existing user
+ *   Step 4: auto-provision new user
+ */
 async function findOrCreateSsoUser({ azure_oid, email, name, employee_code, groups }) {
   const knex = db.getKnex();
 
@@ -58,6 +90,7 @@ async function findOrCreateSsoUser({ azure_oid, email, name, employee_code, grou
   let user = await knex('ts_auth_users').where('azure_oid', azure_oid).first();
 
   if (user) {
+    console.log(`[SSO] Found user by azure_oid: ${azure_oid}`);
     await knex('ts_auth_users').where('id', user.id).update({
       azure_upn: email,
       last_login_at: new Date(),
@@ -65,7 +98,7 @@ async function findOrCreateSsoUser({ azure_oid, email, name, employee_code, grou
     return await knex('ts_auth_users').where('id', user.id).first();
   }
 
-  // ── Step 2: Look up by employee_code (from Azure AD phone_number) ──
+  // ── Step 2: Look up by employee_code (Azure AD phone_number) ───────
   if (employee_code && employee_code.trim()) {
     user = await knex('ts_auth_users')
       .where('employee_code', employee_code.trim())
@@ -81,14 +114,18 @@ async function findOrCreateSsoUser({ azure_oid, email, name, employee_code, grou
         last_login_at: new Date(),
       });
 
-      await knex('ts_audit_log').insert({
-        actor_code: user.employee_code,
-        actor_role: user.role,
-        action: 'sso_account_linked_by_empcode',
-        entity_type: 'auth_users',
-        entity_id: user.id,
-        detail: JSON.stringify({ azure_oid, email, employee_code }),
-      });
+      try {
+        await knex('ts_audit_log').insert({
+          actor_code: user.employee_code,
+          actor_role: user.role,
+          action: 'sso_account_linked_by_empcode',
+          entity_type: 'auth_users',
+          entity_id: user.id,
+          detail: JSON.stringify({ azure_oid, email, employee_code }),
+        });
+      } catch (auditErr) {
+        console.warn('[SSO] Audit log insert failed:', auditErr.message);
+      }
 
       return await knex('ts_auth_users').where('id', user.id).first();
     }
@@ -107,14 +144,18 @@ async function findOrCreateSsoUser({ azure_oid, email, name, employee_code, grou
         last_login_at: new Date(),
       });
 
-      await knex('ts_audit_log').insert({
-        actor_code: user.employee_code,
-        actor_role: user.role,
-        action: 'sso_account_linked',
-        entity_type: 'auth_users',
-        entity_id: user.id,
-        detail: JSON.stringify({ azure_oid, email }),
-      });
+      try {
+        await knex('ts_audit_log').insert({
+          actor_code: user.employee_code,
+          actor_role: user.role,
+          action: 'sso_account_linked',
+          entity_type: 'auth_users',
+          entity_id: user.id,
+          detail: JSON.stringify({ azure_oid, email }),
+        });
+      } catch (auditErr) {
+        console.warn('[SSO] Audit log insert failed:', auditErr.message);
+      }
 
       return await knex('ts_auth_users').where('id', user.id).first();
     }
@@ -142,20 +183,30 @@ async function findOrCreateSsoUser({ azure_oid, email, name, employee_code, grou
     last_login_at: new Date(),
   }).returning('*');
 
-  await knex('ts_audit_log').insert({
-    actor_code: finalEmployeeCode,
-    actor_role: role,
-    action: 'sso_user_provisioned',
-    entity_type: 'auth_users',
-    entity_id: newUser.id,
-    detail: JSON.stringify({ azure_oid, email, employee_code, groups }),
-  });
+  try {
+    await knex('ts_audit_log').insert({
+      actor_code: finalEmployeeCode,
+      actor_role: role,
+      action: 'sso_user_provisioned',
+      entity_type: 'auth_users',
+      entity_id: newUser.id,
+      detail: JSON.stringify({ azure_oid, email, employee_code, groups }),
+    });
+  } catch (auditErr) {
+    console.warn('[SSO] Audit log insert failed:', auditErr.message);
+  }
 
   return newUser;
 }
 
+/**
+ * Determine role from Azure AD groups or admin email list.
+ */
 function determineRole(groups, email) {
-  const adminEmails = (process.env.DEFAULT_ADMIN_EMAILS || '').split(',').map((e) => e.trim().toLowerCase());
+  const adminEmails = (process.env.DEFAULT_ADMIN_EMAILS || '')
+    .split(',')
+    .map((e) => e.trim().toLowerCase());
+
   if (adminEmails.includes(email.toLowerCase())) return 'admin';
 
   if (groups && groups.length > 0 && azureConfig.GROUP_ROLE_MAP) {
@@ -167,15 +218,19 @@ function determineRole(groups, email) {
   return process.env.DEFAULT_SSO_ROLE || 'sales_rep';
 }
 
+/**
+ * Generate a unique employee code based on role prefix.
+ */
 async function generateEmployeeCode(knex, role) {
   const prefixMap = {
     sales_rep: 'SR', tbm: 'TBM', abm: 'ABM', zbm: 'ZBM',
     sales_head: 'SH', admin: 'ADM',
-    at_iol_specialist: 'ATIOL', eq_spec_diagnostic: 'EQSD', eq_spec_surgical: 'EQSS',
-    at_iol_manager: 'ATIOLM', eq_mgr_diagnostic: 'EQMD', eq_mgr_surgical: 'EQMS',
+    at_iol_specialist: 'ATIOL', eq_spec_diagnostic: 'EQSD',
+    eq_spec_surgical: 'EQSS', at_iol_manager: 'ATIOLM',
+    eq_mgr_diagnostic: 'EQMD', eq_mgr_surgical: 'EQMS',
   };
-  const prefix = prefixMap[role] || 'EMP';
 
+  const prefix = prefixMap[role] || 'EMP';
   const lastUser = await knex('ts_auth_users')
     .where('employee_code', 'like', `${prefix}-%`)
     .orderBy('employee_code', 'desc')

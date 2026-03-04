@@ -1,7 +1,7 @@
 'use strict';
 /**
  * azure-ad.js — Azure AD / SSO configuration
- * @version 3.0.0 — Fixed: added JWKS_URI, AUDIENCE, ISSUER, SSO_ENABLED exports
+ * @version 3.0.0 — Added JWKS_URI, AUDIENCE, ISSUER, SSO_ENABLED exports
  *
  * No client secret needed:
  *   - Frontend uses MSAL.js PKCE (no secret for SPA)

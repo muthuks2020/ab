@@ -1,0 +1,40 @@
+const express = require('express');
+const router = express.Router();
+const TBMController = require('../controllers/tbm.controller');
+const { authenticate } = require('../middleware/authenticate');
+const { authorize } = require('../middleware/authorize');
+const { validateBody } = require('../middleware/validate');
+const { approveSchema, bulkApproveSchema, saveTerritoryTargetsSchema, submitTerritoryTargetsSchema, saveYearlyTargetsSchema, publishYearlyTargetsSchema } = require('../validators/schemas');
+router.use(authenticate);
+router.use(authorize('tbm'));
+router.get('/sales-rep-submissions', TBMController.getSalesRepSubmissions);
+router.put('/approve-sales-rep/:id', validateBody(approveSchema), TBMController.approveSalesRepTarget);
+router.put('/reject-sales-rep/:id', TBMController.rejectSalesRepTarget);
+router.post('/bulk-approve-sales-rep', validateBody(bulkApproveSchema), TBMController.bulkApproveSalesRep);
+router.post('/bulk-reject-sales-rep', TBMController.bulkRejectSalesRep);
+router.get('/territory-targets', TBMController.getTerritoryTargets);
+router.post('/territory-targets/save', validateBody(saveTerritoryTargetsSchema), TBMController.saveTerritoryTargets);
+router.post('/territory-targets/submit', validateBody(submitTerritoryTargetsSchema), TBMController.submitTerritoryTargets);
+router.patch('/territory-targets/:id', TBMController.updateTerritoryTarget);
+router.get('/individual-targets', TBMController.getIndividualTargets);
+router.post('/individual-targets/save', validateBody(saveTerritoryTargetsSchema), TBMController.saveIndividualTargets);
+router.post('/individual-targets/submit', validateBody(submitTerritoryTargetsSchema), TBMController.submitIndividualTargets);
+router.patch('/individual-targets/:id', TBMController.updateIndividualTarget);
+router.get('/dashboard-stats', TBMController.getDashboardStats);
+router.get('/yearly-targets', TBMController.getYearlyTargets);
+router.post('/yearly-targets/save', validateBody(saveYearlyTargetsSchema), TBMController.saveYearlyTargets);
+router.post('/yearly-targets/publish', validateBody(publishYearlyTargetsSchema), TBMController.publishYearlyTargets);
+router.get('/team-targets/summary', TBMController.getTeamTargetsSummary);
+router.get('/team-targets/:repId', TBMController.getTeamTargetsForRep);
+router.post('/team-targets/:repId/save', TBMController.saveTeamTargetsForRep);
+router.post('/team-targets/:repId/assign', TBMController.assignTeamTargetsToRep);
+// Team members
+router.get('/team-members', TBMController.getTeamMembers);
+router.get('/unique-reps', TBMController.getUniqueReps);
+// Aliases: FE uses team-yearly-targets, BE has yearly-targets
+router.get('/team-yearly-targets', TBMController.getYearlyTargets);
+router.post('/team-yearly-targets/save', TBMController.saveYearlyTargets);
+// Single target save by ID
+router.put('/territory-targets/:id/save', TBMController.saveSingleTerritoryTarget);
+router.put('/individual-targets/:id/save', TBMController.saveSingleIndividualTarget);
+module.exports = router;

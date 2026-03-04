@@ -1,0 +1,12 @@
+const express = require('express');
+const router = express.Router();
+const CommonController = require('../controllers/common.controller');
+const { authenticate } = require('../middleware/authenticate');
+router.use(authenticate);
+router.get('/categories', CommonController.getCategories);
+router.get('/products', CommonController.getProducts);
+router.get('/product-pricing', CommonController.getProductPricing);
+router.get('/fiscal-years', CommonController.getFiscalYears);
+router.get('/aop-targets', CommonController.getAopTargets);
+router.get('/org-hierarchy', CommonController.getOrgHierarchy);
+module.exports = router;

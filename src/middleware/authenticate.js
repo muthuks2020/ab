@@ -148,6 +148,50 @@ async function authenticate(req, res, next) {
       return next();
     }
 
+    // ── SSO Session Token (from Azure AD login — no JWT needed) ──────────
+    // Token format: sso-session-{email}  (set by frontend AuthContext.js)
+    if (token.startsWith('sso-session-')) {
+      const email = token.replace('sso-session-', '').toLowerCase();
+      const knex = db.getKnex();
+
+      const user = await knex('ts_auth_users')
+        .where('email', email)
+        .andWhere('is_active', true)
+        .first();
+
+      if (!user) {
+        return res.status(401).json({
+          success: false,
+          message: 'SSO user not found in system. Please contact your administrator.',
+        });
+      }
+
+      req.user = {
+        id: user.id,
+        employeeCode: user.employee_code,
+        employee_code: user.employee_code,
+        username: user.username,
+        name: user.full_name,
+        fullName: user.full_name,
+        email: user.email,
+        role: user.role,
+        designation: user.designation,
+        zone_code: user.zone_code,
+        zone_name: user.zone_name,
+        area_code: user.area_code,
+        area_name: user.area_name,
+        territory_code: user.territory_code,
+        territory_name: user.territory_name,
+        reports_to: user.reports_to,
+        auth_provider: 'azure_ad',
+        isVacant: user.is_vacant || false,
+        jti: 'sso-' + email,
+      };
+
+      console.log('[Auth SSO] User resolved — email:', email, '| role:', user.role);
+      return next();
+    }
+
     // ── Step 1: Extract token ───────────────────────────────────────────
     const authHeader = req.headers.authorization;
 

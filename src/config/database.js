@@ -17,11 +17,12 @@ function getKnex() {
     knexInstance = knex({
       client: 'pg',
       connection: {
-        host: process.env.DB_HOST || 'localhost',
-        port: parseInt(process.env.DB_PORT || '5432', 10),
-        database: process.env.DB_NAME || 'appasamy_target',
-        user: process.env.DB_USER || 'postgres',
-        password: process.env.DB_PASSWORD || '',
+        host     : process.env.DB_HOST     || 'report-db.ct0cwymqiinz.ap-south-1.rds.amazonaws.com',
+        port     : parseInt(process.env.DB_PORT || '5432', 10),
+        database : process.env.DB_NAME     || 'appasamy_rpt',
+        user     : process.env.DB_USER     || 'aop_user',
+        password : process.env.DB_PASSWORD || 'aop_access',
+        ssl      : { rejectUnauthorized: false },
       },
       searchPath: [process.env.DB_SCHEMA || 'aop'],
       pool: {

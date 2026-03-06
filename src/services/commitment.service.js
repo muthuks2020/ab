@@ -44,6 +44,7 @@ const CommitmentService = {
         'pm.product_name',
         'pm.product_category',
         'pm.product_family',
+        'pm.product_subgroup',
         'pm.quota_price__c AS unit_cost'
       )
       .orderBy('pc.category_id')
@@ -78,7 +79,7 @@ const CommitmentService = {
     const updated = await db('ts_product_commitments AS pc')
       .join('product_master AS pm', 'pm.productcode', 'pc.product_code')
       .where('pc.id', commitmentId)
-      .select('pc.*', 'pm.product_name', 'pm.product_category', 'pm.product_family', 'pm.quota_price__c AS unit_cost')
+      .select('pc.*', 'pm.product_name', 'pm.product_category', 'pm.product_family', 'pm.product_subgroup', 'pm.quota_price__c AS unit_cost')
       .first();
     return formatCommitment(updated);
   },

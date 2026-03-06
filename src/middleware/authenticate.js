@@ -1,19 +1,121 @@
 /**
- * authenticate.js — Dual-Auth Middleware
- * 
- * Verifies the app JWT on protected routes.
- * DEMO_MODE: Bypasses all auth, injects a static user based on token role.
- * 
- * @version 3.2.0 - Fixed getDemoUser to read role from Bearer demo-token-{role}
+ * authenticate.js — JWT Authentication Middleware
+ *
+ * @version 5.0.0 - Removed SSO, removed session table check, simple JWT verify
  */
 
 const jwt = require('jsonwebtoken');
-const db = require('../config/database');
+const db  = require('../config/database');
 
 const JWT_SECRET = process.env.JWT_SECRET || 'appasamy-target-setting-jwt-secret-change-me';
-const DEMO_MODE = process.env.DEMO_MODE === 'true';
+const DEMO_MODE  = process.env.DEMO_MODE === 'true';
 
-// ── Demo user profiles (used when DEMO_MODE=true) ──────────────────────
+// ── Role normalizer ────────────────────────────────────────────────────────
+// Maps any variation found in DB → application role code
+const ROLE_MAP = {
+  // sales_rep
+  'sales_rep'               : 'sales_rep',
+  'sales rep'               : 'sales_rep',
+  'salesrep'                : 'sales_rep',
+  'sales representative'    : 'sales_rep',
+  'sales_representative'    : 'sales_rep',
+  'salesrepresentative'     : 'sales_rep',
+  'sr'                      : 'sales_rep',
+
+  // tbm
+  'tbm'                             : 'tbm',
+  'territory business manager'      : 'tbm',
+  'territory_business_manager'      : 'tbm',
+  'territorybusinessmanager'        : 'tbm',
+  'territory manager'               : 'tbm',
+  'territory_manager'               : 'tbm',
+
+  // abm
+  'abm'                     : 'abm',
+  'area business manager'   : 'abm',
+  'area_business_manager'   : 'abm',
+  'areabusinessmanager'     : 'abm',
+  'area manager'            : 'abm',
+  'area_manager'            : 'abm',
+
+  // zbm
+  'zbm'                     : 'zbm',
+  'zonal business manager'  : 'zbm',
+  'zonal_business_manager'  : 'zbm',
+  'zonalbusinessmanager'    : 'zbm',
+  'zonal manager'           : 'zbm',
+  'zonal_manager'           : 'zbm',
+
+  // sales_head
+  'sales_head'              : 'sales_head',
+  'sales head'              : 'sales_head',
+  'saleshead'               : 'sales_head',
+  'head of sales'           : 'sales_head',
+  'head_of_sales'           : 'sales_head',
+  'national sales head'     : 'sales_head',
+  'sh'                      : 'sales_head',
+
+  // at_iol_specialist
+  'at_iol_specialist'       : 'at_iol_specialist',
+  'at iol specialist'       : 'at_iol_specialist',
+  'iol specialist'          : 'at_iol_specialist',
+  'iol_specialist'          : 'at_iol_specialist',
+  'at/iol specialist'       : 'at_iol_specialist',
+
+  // eq_spec_diagnostic
+  'eq_spec_diagnostic'              : 'eq_spec_diagnostic',
+  'eq spec diagnostic'              : 'eq_spec_diagnostic',
+  'equipment specialist diagnostic' : 'eq_spec_diagnostic',
+  'equipment_specialist_diagnostic' : 'eq_spec_diagnostic',
+  'equipment specialist (diagnostic)': 'eq_spec_diagnostic',
+
+  // eq_spec_surgical
+  'eq_spec_surgical'                : 'eq_spec_surgical',
+  'eq spec surgical'                : 'eq_spec_surgical',
+  'equipment specialist surgical'   : 'eq_spec_surgical',
+  'equipment_specialist_surgical'   : 'eq_spec_surgical',
+  'equipment specialist (surgical)' : 'eq_spec_surgical',
+
+  // at_iol_manager
+  'at_iol_manager'          : 'at_iol_manager',
+  'at iol manager'          : 'at_iol_manager',
+  'iol manager'             : 'at_iol_manager',
+  'iol_manager'             : 'at_iol_manager',
+  'at/iol manager'          : 'at_iol_manager',
+
+  // eq_mgr_diagnostic
+  'eq_mgr_diagnostic'               : 'eq_mgr_diagnostic',
+  'eq mgr diagnostic'               : 'eq_mgr_diagnostic',
+  'equipment manager diagnostic'    : 'eq_mgr_diagnostic',
+  'equipment_manager_diagnostic'    : 'eq_mgr_diagnostic',
+  'equipment manager (diagnostic)'  : 'eq_mgr_diagnostic',
+
+  // eq_mgr_surgical
+  'eq_mgr_surgical'                 : 'eq_mgr_surgical',
+  'eq mgr surgical'                 : 'eq_mgr_surgical',
+  'equipment manager surgical'      : 'eq_mgr_surgical',
+  'equipment_manager_surgical'      : 'eq_mgr_surgical',
+  'equipment manager (surgical)'    : 'eq_mgr_surgical',
+
+  // admin
+  'admin'                   : 'admin',
+  'administrator'           : 'admin',
+  'system administrator'    : 'admin',
+  'system_administrator'    : 'admin',
+  'sysadmin'                : 'admin',
+};
+
+function normalizeRole(rawRole) {
+  if (!rawRole) return null;
+  const key = rawRole.trim().toLowerCase();
+  const mapped = ROLE_MAP[key];
+  if (!mapped) {
+    console.warn(`[Auth] Unknown role in DB: "${rawRole}" — access will be denied`);
+  }
+  return mapped || null;
+}
+
+// ── Demo user profiles ─────────────────────────────────────────────────────
 const DEMO_USERS = {
   sales_rep: {
     id: 1, employeeCode: 'E-000001', employee_code: 'E-000001',
@@ -23,7 +125,7 @@ const DEMO_USERS = {
     zone_code: 'Z3', zone_name: 'Zone-3',
     area_code: 'A-BHR', area_name: 'Bihar',
     territory_code: 'T-BHR-PAT-1', territory_name: 'Bihar(Patna)-1',
-    reports_to: 'E-000002', auth_provider: 'local', isVacant: false, jti: 'demo-jti',
+    reports_to: 'E-000002', isVacant: false,
   },
   tbm: {
     id: 2, employeeCode: 'E-000002', employee_code: 'E-000002',
@@ -33,7 +135,7 @@ const DEMO_USERS = {
     zone_code: 'Z3', zone_name: 'Zone-3',
     area_code: 'A-BHR', area_name: 'Bihar',
     territory_code: 'T-BHR-PAT-1', territory_name: 'Bihar(Patna)-1',
-    reports_to: 'E-000003', auth_provider: 'local', isVacant: false, jti: 'demo-jti',
+    reports_to: 'E-000003', isVacant: false,
   },
   abm: {
     id: 3, employeeCode: 'E-000003', employee_code: 'E-000003',
@@ -43,7 +145,7 @@ const DEMO_USERS = {
     zone_code: 'Z3', zone_name: 'Zone-3',
     area_code: 'A-BHR', area_name: 'Bihar',
     territory_code: null, territory_name: null,
-    reports_to: 'E-000004', auth_provider: 'local', isVacant: false, jti: 'demo-jti',
+    reports_to: 'E-000004', isVacant: false,
   },
   zbm: {
     id: 4, employeeCode: 'E-000004', employee_code: 'E-000004',
@@ -53,7 +155,7 @@ const DEMO_USERS = {
     zone_code: 'Z3', zone_name: 'Zone-3',
     area_code: null, area_name: null,
     territory_code: null, territory_name: null,
-    reports_to: 'E-000005', auth_provider: 'local', isVacant: false, jti: 'demo-jti',
+    reports_to: 'E-000005', isVacant: false,
   },
   sales_head: {
     id: 5, employeeCode: 'E-000005', employee_code: 'E-000005',
@@ -63,37 +165,7 @@ const DEMO_USERS = {
     zone_code: null, zone_name: null,
     area_code: null, area_name: null,
     territory_code: null, territory_name: null,
-    reports_to: null, auth_provider: 'local', isVacant: false, jti: 'demo-jti',
-  },
-  at_iol_specialist: {
-    id: 6, employeeCode: 'E-000006', employee_code: 'E-000006',
-    username: 'iolspec', name: 'Demo IOL Specialist', fullName: 'Demo IOL Specialist',
-    email: 'iolspec@appasamy.com', role: 'at_iol_specialist',
-    designation: 'AT/IOL Specialist',
-    zone_code: 'Z3', zone_name: 'Zone-3',
-    area_code: 'A-BHR', area_name: 'Bihar',
-    territory_code: 'T-BHR-PAT-1', territory_name: 'Bihar(Patna)-1',
-    reports_to: 'E-000003', auth_provider: 'local', isVacant: false, jti: 'demo-jti',
-  },
-  eq_spec_diagnostic: {
-    id: 7, employeeCode: 'E-000007', employee_code: 'E-000007',
-    username: 'eqdiag', name: 'Demo Equip Spec Diagnostic', fullName: 'Demo Equip Spec Diagnostic',
-    email: 'eqdiag@appasamy.com', role: 'eq_spec_diagnostic',
-    designation: 'Equipment Specialist (Diagnostic)',
-    zone_code: 'Z3', zone_name: 'Zone-3',
-    area_code: 'A-BHR', area_name: 'Bihar',
-    territory_code: 'T-BHR-PAT-1', territory_name: 'Bihar(Patna)-1',
-    reports_to: 'E-000003', auth_provider: 'local', isVacant: false, jti: 'demo-jti',
-  },
-  eq_spec_surgical: {
-    id: 8, employeeCode: 'E-000008', employee_code: 'E-000008',
-    username: 'eqsurg', name: 'Demo Equip Spec Surgical', fullName: 'Demo Equip Spec Surgical',
-    email: 'eqsurg@appasamy.com', role: 'eq_spec_surgical',
-    designation: 'Equipment Specialist (Surgical)',
-    zone_code: 'Z3', zone_name: 'Zone-3',
-    area_code: 'A-BHR', area_name: 'Bihar',
-    territory_code: 'T-BHR-PAT-1', territory_name: 'Bihar(Patna)-1',
-    reports_to: 'E-000003', auth_provider: 'local', isVacant: false, jti: 'demo-jti',
+    reports_to: null, isVacant: false,
   },
   admin: {
     id: 99, employeeCode: 'E-000099', employee_code: 'E-000099',
@@ -103,223 +175,99 @@ const DEMO_USERS = {
     zone_code: null, zone_name: null,
     area_code: null, area_name: null,
     territory_code: null, territory_name: null,
-    reports_to: null, auth_provider: 'local', isVacant: false, jti: 'demo-jti',
+    reports_to: null, isVacant: false,
   },
 };
 
-/**
- * Get demo user — reads role from:
- *   1. x-demo-role header
- *   2. Bearer demo-token-{role} token  ★ THIS WAS MISSING
- *   3. DEMO_ROLE env variable
- *   4. Defaults to sales_rep
- */
 function getDemoUser(req) {
   let role = req.headers['x-demo-role'];
-
-  // ★ FIX: Extract role from demo token (demo-token-tbm → tbm)
   if (!role) {
-    const authHeader = req.headers.authorization || '';
-    const token = authHeader.replace('Bearer ', '');
-    if (token.startsWith('demo-token-')) {
-      role = token.replace('demo-token-', '');
-    }
+    const token = (req.headers.authorization || '').replace('Bearer ', '');
+    if (token.startsWith('demo-token-')) role = token.replace('demo-token-', '');
   }
-
-  if (!role) {
-    role = process.env.DEMO_ROLE;
-  }
-
+  if (!role) role = process.env.DEMO_ROLE;
   role = (role || 'sales_rep').toLowerCase();
-  
-  console.log(`[Auth DEMO] Resolved role: ${role}`);
-  
+  console.log(`[Auth DEMO] role: ${role}`);
   return DEMO_USERS[role] || DEMO_USERS.sales_rep;
 }
 
-/**
- * Main authentication middleware.
- */
+// ── Main middleware ────────────────────────────────────────────────────────
 async function authenticate(req, res, next) {
   try {
-    // ── DEMO MODE: bypass all auth ──────────────────────────────────────
+    // Demo mode — bypass all auth
     if (DEMO_MODE) {
       req.user = getDemoUser(req);
       return next();
     }
 
-    // ── SSO Session Token (from Azure AD login — no JWT needed) ──────────
-    // Token format: sso-session-{email}  (set by frontend AuthContext.js)
-    if (token.startsWith('sso-session-')) {
-      const email = token.replace('sso-session-', '').toLowerCase();
-      const knex = db.getKnex();
-
-      const user = await knex('ts_auth_users')
-        .where('email', email)
-        .andWhere('is_active', true)
-        .first();
-
-      if (!user) {
-        return res.status(401).json({
-          success: false,
-          message: 'SSO user not found in system. Please contact your administrator.',
-        });
-      }
-
-      req.user = {
-        id: user.id,
-        employeeCode: user.employee_code,
-        employee_code: user.employee_code,
-        username: user.username,
-        name: user.full_name,
-        fullName: user.full_name,
-        email: user.email,
-        role: user.role,
-        designation: user.designation,
-        zone_code: user.zone_code,
-        zone_name: user.zone_name,
-        area_code: user.area_code,
-        area_name: user.area_name,
-        territory_code: user.territory_code,
-        territory_name: user.territory_name,
-        reports_to: user.reports_to,
-        auth_provider: 'azure_ad',
-        isVacant: user.is_vacant || false,
-        jti: 'sso-' + email,
-      };
-
-      console.log('[Auth SSO] User resolved — email:', email, '| role:', user.role);
-      return next();
-    }
-
-    // ── Step 1: Extract token ───────────────────────────────────────────
+    // Extract Bearer token
     const authHeader = req.headers.authorization;
-
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      return res.status(401).json({
-        success: false,
-        message: 'Access denied. No token provided.',
-      });
+      return res.status(401).json({ success: false, message: 'Access denied. No token provided.' });
     }
 
     const token = authHeader.split(' ')[1];
 
-    if (!token) {
-      return res.status(401).json({
-        success: false,
-        message: 'Access denied. Invalid token format.',
-      });
-    }
-
-    // ── Step 2: Verify JWT ──────────────────────────────────────────────
+    // Verify JWT
     let decoded;
     try {
       decoded = jwt.verify(token, JWT_SECRET);
     } catch (jwtErr) {
       if (jwtErr.name === 'TokenExpiredError') {
-        return res.status(401).json({
-          success: false,
-          message: 'Token expired. Please login again.',
-          code: 'TOKEN_EXPIRED',
-        });
+        return res.status(401).json({ success: false, message: 'Token expired. Please login again.', code: 'TOKEN_EXPIRED' });
       }
-      return res.status(401).json({
-        success: false,
-        message: 'Invalid token.',
-      });
+      return res.status(401).json({ success: false, message: 'Invalid token.' });
     }
 
-    // ── Step 3: Check session is not revoked ────────────────────────────
+    // Fetch user from aop.ts_auth_users in appasamy_rpt
     const knex = db.getKnex();
-
-    if (decoded.jti) {
-      const session = await knex('ts_user_sessions')
-        .where('token_jti', decoded.jti)
-        .whereNull('revoked_at')
-        .where('expires_at', '>', knex.fn.now())
-        .first();
-
-      if (!session) {
-        return res.status(401).json({
-          success: false,
-          message: 'Session expired or revoked. Please login again.',
-          code: 'SESSION_REVOKED',
-        });
-      }
-    }
-
-    // ── Step 4: Fetch user and verify active ────────────────────────────
-    const user = await knex('ts_auth_users')
-      .where('id', decoded.id || decoded.userId)
+    const user = await knex('aop.ts_auth_users')
+      .where('id', decoded.id)
       .andWhere('is_active', true)
       .first();
 
     if (!user) {
-      return res.status(401).json({
-        success: false,
-        message: 'User account not found or deactivated.',
-      });
+      return res.status(401).json({ success: false, message: 'User account not found or deactivated.' });
     }
 
-    // ── Step 5: Attach user to request ──────────────────────────────────
+    // Normalize role from DB value → application role code
+    const normalizedRole = normalizeRole(user.role);
+    if (!normalizedRole) {
+      console.error(`[Auth] Cannot map DB role "${user.role}" for user ${user.email}`);
+      return res.status(403).json({ success: false, message: `Unrecognized role "${user.role}". Please contact admin.` });
+    }
+
+    // Attach to request
     req.user = {
-      id: user.id,
-      employeeCode: user.employee_code,
-      employee_code: user.employee_code,
-      username: user.username,
-      name: user.full_name,
-      fullName: user.full_name,
-      email: user.email,
-      role: user.role,
-      designation: user.designation,
-      zone_code: user.zone_code,
-      zone_name: user.zone_name,
-      area_code: user.area_code,
-      area_name: user.area_name,
-      territory_code: user.territory_code,
-      territory_name: user.territory_name,
-      reports_to: user.reports_to,
-      auth_provider: user.auth_provider,
-      isVacant: user.is_vacant || false,
-      jti: decoded.jti,
+      id             : user.id,
+      employeeCode   : user.employee_code,
+      employee_code  : user.employee_code,
+      username       : user.username,
+      name           : user.full_name,
+      fullName       : user.full_name,
+      email          : user.email,
+      role           : normalizedRole,
+      designation    : user.designation,
+      zone_code      : user.zone_code,
+      zone_name      : user.zone_name,
+      area_code      : user.area_code,
+      area_name      : user.area_name,
+      territory_code : user.territory_code,
+      territory_name : user.territory_name,
+      reports_to     : user.reports_to,
+      isVacant       : user.is_vacant || false,
     };
 
     next();
   } catch (error) {
     console.error('[Auth Middleware] Error:', error);
-    return res.status(500).json({
-      success: false,
-      message: 'Authentication error.',
-    });
+    return res.status(500).json({ success: false, message: 'Authentication error.' });
   }
 }
 
-/**
- * Optional auth middleware — attaches user if token present, doesn't block.
- */
-async function optionalAuth(req, res, next) {
-  if (DEMO_MODE) {
-    req.user = getDemoUser(req);
-    return next();
-  }
-
-  const authHeader = req.headers.authorization;
-
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    req.user = null;
-    return next();
-  }
-
-  try {
-    await authenticate(req, res, () => {});
-  } catch {
-    req.user = null;
-  }
-
+function optionalAuth(req, res, next) {
+  req.user = null;
   next();
 }
 
-module.exports = {
-  authenticate,
-  optionalAuth,
-};
+module.exports = { authenticate, optionalAuth };

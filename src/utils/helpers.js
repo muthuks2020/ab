@@ -70,6 +70,7 @@ const formatCommitment = (row) => ({
   unitCost: row.unit_cost ? parseFloat(row.unit_cost) : null,
   productCategory: row.product_category || null,
   productFamily: row.product_family || null,
+  productSubgroup: row.product_subgroup || null,
 });
 
 /**

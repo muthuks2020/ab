@@ -35,18 +35,20 @@ const CommitmentService = {
     const activeFy = fiscalYearCode
       || (await db('ts_fiscal_years').where('is_active', true).first())?.code;
 
+    // DISTINCT ON subquery — product_master has duplicate productcodes,
+    // a direct JOIN would multiply commitment rows and double all values.
+    const pmSubquery = db('product_master')
+      .distinctOn('productcode')
+      .select('productcode', 'product_name', 'product_category', 'product_family', 'product_subgroup', 'quota_price__c AS unit_cost')
+      .orderBy('productcode')
+      .orderBy('product_name')
+      .as('pm');
+
     const rows = await db('ts_product_commitments AS pc')
-      .join('product_master AS pm', 'pm.productcode', 'pc.product_code')
+      .join(pmSubquery, 'pm.productcode', 'pc.product_code')
       .where('pc.employee_code', employeeCode)
       .modify((qb) => { if (activeFy) qb.where('pc.fiscal_year_code', activeFy); })
-      .select(
-        'pc.*',
-        'pm.product_name',
-        'pm.product_category',
-        'pm.product_family',
-        'pm.product_subgroup',
-        'pm.quota_price__c AS unit_cost'
-      )
+      .select('pc.*', 'pm.product_name', 'pm.product_category', 'pm.product_family', 'pm.product_subgroup', 'pm.unit_cost')
       .orderBy('pc.category_id')
       .orderBy('pm.product_name');
 
@@ -75,11 +77,17 @@ const CommitmentService = {
         status: 'draft',
       });
 
-    // Re-fetch with JOIN to product_master
+    // Re-fetch with DISTINCT ON subquery to avoid duplicate rows from product_master
+    const pmSub = db('product_master')
+      .distinctOn('productcode')
+      .select('productcode', 'product_name', 'product_category', 'product_family', 'product_subgroup', 'quota_price__c AS unit_cost')
+      .orderBy('productcode')
+      .orderBy('product_name')
+      .as('pm');
     const updated = await db('ts_product_commitments AS pc')
-      .join('product_master AS pm', 'pm.productcode', 'pc.product_code')
+      .join(pmSub, 'pm.productcode', 'pc.product_code')
       .where('pc.id', commitmentId)
-      .select('pc.*', 'pm.product_name', 'pm.product_category', 'pm.product_family', 'pm.product_subgroup', 'pm.quota_price__c AS unit_cost')
+      .select('pc.*', 'pm.product_name', 'pm.product_category', 'pm.product_family', 'pm.product_subgroup', 'pm.unit_cost')
       .first();
     return formatCommitment(updated);
   },

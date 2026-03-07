@@ -1,6 +1,8 @@
 /**
  * common.service.js — Shared Service (Categories, Products, Fiscal Years, Org Hierarchy)
- * @version 2.0.0 - Migrated to aop schema (v5). Products now from aop.product_master.
+ * @version 2.1.0 - Fixed getCategories() to use LEFT JOIN so categories without an explicit
+ *                  ts_role_product_access row (e.g. consumable-sales for sales_rep) are still
+ *                  returned. A category is hidden ONLY if a row exists AND can_view = false.
  */
 
 const { db } = require('../config/database');
@@ -9,14 +11,22 @@ const CommonService = {
 
   /**
    * GET /categories — filtered by user role
+   *
+   * Uses LEFT JOIN so categories that have NO row in ts_role_product_access are still
+   * shown (open-by-default). A category is excluded only when a row explicitly sets
+   * can_view = false for the given role.
    */
   async getCategories(userRole) {
     const rows = await db('ts_product_categories AS c')
-      .join('ts_role_product_access AS rpa', function () {
-        this.on('rpa.category_id', '=', 'c.id').andOn('rpa.can_view', '=', db.raw('true'));
+      .leftJoin('ts_role_product_access AS rpa', function () {
+        this.on('rpa.category_id', '=', 'c.id')
+            .andOn(db.raw('rpa.role = ?', [userRole]));
       })
-      .where('rpa.role', userRole)
       .where('c.is_active', true)
+      .where(function () {
+        // Show if: no access rule exists (NULL) OR the rule explicitly allows viewing
+        this.whereNull('rpa.id').orWhere('rpa.can_view', true);
+      })
       .select('c.id', 'c.name', 'c.icon', 'c.color_class', 'c.is_revenue_only', 'c.display_order')
       .orderBy('c.display_order');
 

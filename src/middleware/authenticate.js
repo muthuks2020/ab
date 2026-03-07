@@ -53,7 +53,7 @@ const ROLE_MAP = {
   'head of sales'           : 'sales_head',
   'head_of_sales'           : 'sales_head',
   'national sales head'     : 'sales_head',
-  'sh'                      : 'sales_head',
+  'sales head (surgical)'   : 'sales_head',
 
   // at_iol_specialist
   'at_iol_specialist'       : 'at_iol_specialist',

@@ -711,7 +711,7 @@ const TBMService = {
         // Look up assignee to get real role and territory (uses existing DB columns)
         const assignee = await db('ts_auth_users').where({ employee_code: m.id }).first();
         await db('ts_yearly_target_assignments').insert({
-          fiscal_year_code: fiscalYear,
+          fiscal_year_code: fy,           // ✅ use normalized code (e.g. 'FY26_27'), not raw frontend value ('2026-27')
           manager_code: tbmUser.employeeCode,
           manager_role: tbmUser.role,
           geo_level: 'territory',

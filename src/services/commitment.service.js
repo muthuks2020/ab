@@ -157,27 +157,54 @@ const CommitmentService = {
    */
   async saveAll(products, user) {
     let savedCount = 0;
-    for (const p of products) {
-      const existing = await db('ts_product_commitments')
-        .where({ id: p.id, employee_code: user.employeeCode })
-        .whereIn('status', ['draft', 'not_started'])
-        .first();
 
-      if (existing) {
-        await db('ts_product_commitments')
-          .where({ id: p.id })
-          .update({
-            monthly_targets: JSON.stringify(p.monthlyTargets),
-            status: 'draft',
-          });
-        savedCount++;
+    // Fetch unit_cost for all products in one query
+    const productIds = products.map((p) => p.id);
+    const pmSub = db('product_master')
+      .distinctOn('productcode')
+      .select('productcode', 'quota_price__c AS unit_cost')
+      .orderBy('productcode')
+      .as('pm');
+    const commitmentRows = await db('ts_product_commitments AS pc')
+      .join(pmSub, 'pm.productcode', 'pc.product_code')
+      .whereIn('pc.id', productIds)
+      .where('pc.employee_code', user.employeeCode)
+      .whereIn('pc.status', ['draft', 'not_started'])
+      .select('pc.id', 'pm.unit_cost');
+    const unitCostMap = Object.fromEntries(
+      commitmentRows.map((r) => [r.id, parseFloat(r.unit_cost || 0)])
+    );
+
+    for (const p of products) {
+      if (!unitCostMap.hasOwnProperty(p.id)) continue; // not found or wrong status
+
+      const unitCost = unitCostMap[p.id];
+
+      // Compute cyRev = cyQty × unit_cost for each month
+      const enrichedTargets = {};
+      for (const [month, data] of Object.entries(p.monthlyTargets || {})) {
+        enrichedTargets[month] = {
+          ...data,
+          cyRev: Math.round((data.cyQty || 0) * unitCost),
+        };
       }
+
+      await db('ts_product_commitments')
+        .where({ id: p.id })
+        .update({
+          monthly_targets: JSON.stringify(enrichedTargets),
+          status: 'draft',
+        });
+      savedCount++;
     }
     return { success: true, savedCount };
   },
 
   /**
    * GET /salesrep/dashboard-summary
+   * targetValue = cy_target_value published by TBM in ts_yearly_target_assignments
+   *               (what TBM assigned as THIS year's target for the SR)
+   * cyRev       = sum of cyRev entered by sales rep in monthly_targets (cyQty x unit_cost)
    */
   async getDashboardSummary(employeeCode) {
     const activeFy = await db('ts_fiscal_years').where('is_active', true).first();
@@ -187,11 +214,41 @@ const CommitmentService = {
       .where({ employee_code: employeeCode, fiscal_year_code: activeFy.code });
 
     const totals = aggregateMonthlyTargets(commitments);
+
+    // ── LY Revenue: sum flat target_revenue column (monthly_targets JSONB is empty for FY25_26 rows)
+    // Priority: (1) ts_yearly_target_assignments.ly_target_value set by TBM
+    //           (2) SUM(target_revenue) from ts_product_commitments flat column (always populated)
+    const lyAssignRow = await db('ts_yearly_target_assignments')
+      .where({ assignee_code: employeeCode, fiscal_year_code: activeFy.code })
+      .sum('ly_target_value as total')
+      .first();
+
+    const lyRevFlatRow = await db('ts_product_commitments')
+      .where({ employee_code: employeeCode, fiscal_year_code: activeFy.code })
+      .sum('target_revenue as total')
+      .first();
+
+    const lyRev = (lyAssignRow?.total && parseFloat(lyAssignRow.total) > 0)
+      ? parseFloat(lyAssignRow.total)
+      : (lyRevFlatRow?.total ? parseFloat(lyRevFlatRow.total) : 0);
+
+    // ── CY Target: what TBM has assigned for this SR (cy_target_value)
+    const cyAssignRow = await db('ts_yearly_target_assignments')
+      .where({ assignee_code: employeeCode, fiscal_year_code: activeFy.code })
+      .sum('cy_target_value as total')
+      .first();
+
+    const targetValue = (cyAssignRow?.total && parseFloat(cyAssignRow.total) > 0)
+      ? parseFloat(cyAssignRow.total)
+      : 0; // 0 means TBM hasn't assigned yet — frontend shows "Not Set" for targetValue
+
     return {
       ...totals,
+      lyRev,
+      targetValue,  // TBM's CY target for this SR — used as overallYearlyTargetValue in grid
       qtyGrowth: calcGrowth(totals.lyQty, totals.cyQty),
-      revGrowth: calcGrowth(totals.lyRev, totals.cyRev),
-      aopAchievementPct: 0,
+      revGrowth: calcGrowth(targetValue, totals.cyRev),
+      aopAchievementPct: targetValue > 0 ? Math.round((totals.cyRev / targetValue) * 100) : 0,
       fiscalYear: activeFy.label,
       totalProducts: commitments.length,
       draftCount: commitments.filter((c) => c.status === 'draft').length,

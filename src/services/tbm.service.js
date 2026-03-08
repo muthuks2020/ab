@@ -505,6 +505,24 @@ const TBMService = {
     const fy = fiscalYearCode || (await db('ts_fiscal_years').where('is_active', true).first())?.code;
     if (!fy) return { members: [] };
 
+    // Compute previous FY code — handles both "FY26_27" and "2026-27" formats
+    const computePrevFy = (fyCode) => {
+      // Format: FY26_27
+      const m1 = fyCode.match(/FY(\d{2})_(\d{2})/);
+      if (m1) {
+        return `FY${String(parseInt(m1[1]) - 1).padStart(2,'0')}_${String(parseInt(m1[2]) - 1).padStart(2,'0')}`;
+      }
+      // Format: 2026-27
+      const m2 = fyCode.match(/(\d{4})-(\d{2})/);
+      if (m2) {
+        const y1 = parseInt(m2[1]) - 1;
+        const y2 = parseInt(m2[2]) - 1;
+        return `FY${String(y1).slice(-2)}_${String(y2).padStart(2,'0')}`;
+      }
+      return null;
+    };
+    const prevFyForLY = computePrevFy(fy);
+
     const directReports = await getKnex().raw(
       `SELECT employee_code, full_name, designation, territory_name FROM aop.ts_fn_get_direct_reports(?::varchar)`,
       [tbmEmployeeCode]
@@ -520,20 +538,96 @@ const TBMService = {
         })
         .first();
 
+      // LY TARGET = sum of target_revenue/target_quantity from FY25_26 commitments (flat columns)
+      // FY25_26 records store data in flat columns, not JSONB monthly_targets
+      let lyTargetValue   = assignment ? parseFloat(assignment.ly_target_value)  : 0;
+      let lyAchievedValue = assignment ? parseFloat(assignment.ly_achieved_value) : 0;
+      let lyTarget        = assignment ? parseFloat(assignment.ly_target_qty)     : 0;
+      let lyAchieved      = assignment ? parseFloat(assignment.ly_achieved_qty)   : 0;
+
+      if (!lyTargetValue && !lyAchievedValue) {
+        const prevFy = prevFyForLY;
+
+        if (prevFy) {
+          // FY25_26 stores data in flat columns target_revenue & target_quantity
+          const lyResult = await db('ts_product_commitments')
+            .where({ employee_code: sr.employee_code, fiscal_year_code: prevFy })
+            .sum({ totalRev: 'target_revenue', totalQty: 'target_quantity' })
+            .first();
+
+          lyTargetValue = parseFloat(lyResult?.totalRev) || 0;
+          lyTarget      = parseFloat(lyResult?.totalQty)  || 0;
+        }
+
+        // Backfill assignment row so future reads are fast
+        if (assignment && (lyTargetValue > 0 || lyTarget > 0)) {
+          await db('ts_yearly_target_assignments')
+            .where({ id: assignment.id })
+            .update({ ly_target_value: lyTargetValue, ly_target_qty: lyTarget, updated_at: new Date() });
+        }
+      }
+
+      // Build category-level LY breakdown from FY25_26 flat columns
+      let categoryBreakdown = assignment?.category_breakdown || [];
+      if (!Array.isArray(categoryBreakdown) || categoryBreakdown.length === 0) {
+        const prevFy = prevFyForLY;
+
+        // LY per category: sum flat columns from FY25_26
+        const lyRows = prevFy
+          ? await db('ts_product_commitments')
+              .where({ employee_code: sr.employee_code, fiscal_year_code: prevFy })
+              .groupBy('category_id')
+              .select('category_id')
+              .sum({ lyRev: 'target_revenue', lyQty: 'target_quantity' })
+          : [];
+
+        // CY per category: sum cyRev/cyQty from JSONB for current FY
+        const currCommitments = await db('ts_product_commitments')
+          .where({ employee_code: sr.employee_code, fiscal_year_code: fy })
+          .select('category_id', 'monthly_targets');
+
+        const catCyMap = {};
+        for (const c of currCommitments) {
+          const catId = c.category_id; if (!catId) continue;
+          if (!catCyMap[catId]) catCyMap[catId] = { cyRev: 0, cyQty: 0 };
+          const mt = c.monthly_targets || {};
+          for (const m of Object.values(mt)) {
+            catCyMap[catId].cyRev += Number(m.cyRev || 0);
+            catCyMap[catId].cyQty += Number(m.cyQty || 0);
+          }
+        }
+
+        const catIds = new Set([...lyRows.map(r => r.category_id), ...Object.keys(catCyMap)]);
+        categoryBreakdown = Array.from(catIds).map(id => {
+          const ly = lyRows.find(r => r.category_id === id) || {};
+          const cy = catCyMap[id] || {};
+          return {
+            id,
+            name: id.charAt(0).toUpperCase() + id.slice(1).replace(/-/g, ' '),
+            lyTargetValue:   parseFloat(ly.lyRev) || 0,
+            lyAchievedValue: 0,
+            lyTarget:        parseFloat(ly.lyQty)  || 0,
+            lyAchieved:      0,
+            cyTarget:        cy.cyQty || 0,
+            cyTargetValue:   cy.cyRev || 0,
+          };
+        });
+      }
+
       members.push({
         id: sr.employee_code,
         name: sr.full_name,
         territory: sr.territory_name,
         designation: sr.designation,
-        lyTarget: assignment ? parseFloat(assignment.ly_target_qty) : 0,
-        lyAchieved: assignment ? parseFloat(assignment.ly_achieved_qty) : 0,
-        lyTargetValue: assignment ? parseFloat(assignment.ly_target_value) : 0,
-        lyAchievedValue: assignment ? parseFloat(assignment.ly_achieved_value) : 0,
-        cyTarget: assignment ? parseFloat(assignment.cy_target_qty) : 0,
+        lyTarget,
+        lyAchieved,
+        lyTargetValue,
+        lyAchievedValue,
+        cyTarget:      assignment ? parseFloat(assignment.cy_target_qty)   : 0,
         cyTargetValue: assignment ? parseFloat(assignment.cy_target_value) : 0,
         status: assignment?.status || 'not_set',
         lastUpdated: assignment?.updated_at || null,
-        categoryBreakdown: assignment?.category_breakdown || [],
+        categoryBreakdown,
       });
     }
 
@@ -560,20 +654,22 @@ const TBMService = {
         cy_target_value: m.cyTargetValue || 0,
         category_breakdown: m.categoryBreakdown ? JSON.stringify(m.categoryBreakdown) : '[]',
         status: 'draft',
+        updated_at: new Date(),
       };
 
       if (existing) {
         await db('ts_yearly_target_assignments').where({ id: existing.id }).update(data);
       } else {
+        // Look up assignee to get real role and territory (uses existing DB columns)
         const assignee = await db('ts_auth_users').where({ employee_code: m.id }).first();
         await db('ts_yearly_target_assignments').insert({
           fiscal_year_code: fiscalYear,
           manager_code: tbmUser.employeeCode,
           manager_role: tbmUser.role,
+          geo_level: 'territory',
           assignee_code: m.id,
-          assignee_name: assignee?.full_name || '',
           assignee_role: assignee?.role || 'sales_rep',
-          assignee_territory: assignee?.territory_name || '',
+          territory_name: assignee?.territory_name || '',
           ...data,
         });
       }

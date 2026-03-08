@@ -72,7 +72,16 @@ const TBMController = {
     catch (err) { next(err); }
   },
   async getYearlyTargets(req, res, next) {
-    try { res.json(await TBMService.getYearlyTargets(req.user.employeeCode, req.query.fy)); }
+    try {
+      // Normalize fy param: accept both "2026-27" and "FY26_27" formats
+      const rawFy = req.query.fy;
+      const fy = rawFy
+        ? rawFy.startsWith('FY')
+          ? rawFy
+          : 'FY' + rawFy.replace('-', '_').split('_').map(p => p.slice(-2)).join('_')
+        : undefined;
+      res.json(await TBMService.getYearlyTargets(req.user.employeeCode, fy));
+    }
     catch (err) { next(err); }
   },
   async saveYearlyTargets(req, res, next) {

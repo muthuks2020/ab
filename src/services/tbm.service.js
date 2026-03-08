@@ -6,6 +6,18 @@
 const { db, getKnex } = require('../config/database');
 const { formatCommitment, aggregateMonthlyTargets, calcGrowth } = require('../utils/helpers');
 
+/**
+ * Normalize fiscal year code to DB format (FY26_27).
+ * Handles frontend format '2026-27' → 'FY26_27'
+ */
+function normalizeFY(fyCode) {
+  if (!fyCode) return fyCode;
+  if (/^FY\d{2}_\d{2}$/.test(fyCode)) return fyCode;
+  const m = fyCode.match(/(\d{4})-(\d{2})/);
+  if (m) return `FY${String(m[1]).slice(-2)}_${m[2]}`;
+  return fyCode;
+}
+
 const TBMService = {
 
   /**
@@ -502,7 +514,8 @@ const TBMService = {
    * GET /tbm/yearly-targets
    */
   async getYearlyTargets(tbmEmployeeCode, fiscalYearCode) {
-    const fy = fiscalYearCode || (await db('ts_fiscal_years').where('is_active', true).first())?.code;
+    const rawFy = fiscalYearCode || (await db('ts_fiscal_years').where('is_active', true).first())?.code;
+    const fy = normalizeFY(rawFy);
     if (!fy) return { members: [] };
 
     // Compute previous FY code — handles both "FY26_27" and "2026-27" formats
@@ -545,26 +558,42 @@ const TBMService = {
       let lyTarget        = assignment ? parseFloat(assignment.ly_target_qty)     : 0;
       let lyAchieved      = assignment ? parseFloat(assignment.ly_achieved_qty)   : 0;
 
-      if (!lyTargetValue && !lyAchievedValue) {
-        const prevFy = prevFyForLY;
+      const prevFy = prevFyForLY;
 
-        if (prevFy) {
-          // FY25_26 stores data in flat columns target_revenue & target_quantity
-          const lyResult = await db('ts_product_commitments')
-            .where({ employee_code: sr.employee_code, fiscal_year_code: prevFy })
-            .sum({ totalRev: 'target_revenue', totalQty: 'target_quantity' })
-            .first();
+      // Fetch LY target only if not already in FY26_27 assignment row
+      if (!lyTargetValue && prevFy) {
+        const lyResult = await db('ts_product_commitments')
+          .where({ employee_code: sr.employee_code, fiscal_year_code: prevFy })
+          .sum({ totalRev: 'target_revenue', totalQty: 'target_quantity' })
+          .first();
 
-          lyTargetValue = parseFloat(lyResult?.totalRev) || 0;
-          lyTarget      = parseFloat(lyResult?.totalQty)  || 0;
-        }
+        lyTargetValue = parseFloat(lyResult?.totalRev) || 0;
+        lyTarget      = parseFloat(lyResult?.totalQty)  || 0;
+      }
 
-        // Backfill assignment row so future reads are fast
-        if (assignment && (lyTargetValue > 0 || lyTarget > 0)) {
-          await db('ts_yearly_target_assignments')
-            .where({ id: assignment.id })
-            .update({ ly_target_value: lyTargetValue, ly_target_qty: lyTarget, updated_at: new Date() });
-        }
+      // Fetch LY achieved independently — runs even when lyTargetValue is already set
+      // This fixes the bug where ly_target_value was backfilled but ly_achieved_value was not
+      if (!lyAchievedValue && prevFy) {
+        const lyAssignment = await db('ts_yearly_target_assignments')
+          .where({ fiscal_year_code: prevFy, assignee_code: sr.employee_code })
+          .sum({ totalAchRev: 'ly_achieved_value', totalAchQty: 'ly_achieved_qty' })
+          .first();
+
+        lyAchievedValue = parseFloat(lyAssignment?.totalAchRev) || 0;
+        lyAchieved      = parseFloat(lyAssignment?.totalAchQty)  || 0;
+      }
+
+      // Backfill FY26_27 assignment row so future reads are instant
+      if (assignment && (lyTargetValue > 0 || lyAchievedValue > 0)) {
+        await db('ts_yearly_target_assignments')
+          .where({ id: assignment.id })
+          .update({
+            ly_target_value:   lyTargetValue,
+            ly_target_qty:     lyTarget,
+            ly_achieved_value: lyAchievedValue,
+            ly_achieved_qty:   lyAchieved,
+            updated_at:        new Date(),
+          });
       }
 
       // Build category-level LY breakdown from FY25_26 flat columns
@@ -572,13 +601,22 @@ const TBMService = {
       if (!Array.isArray(categoryBreakdown) || categoryBreakdown.length === 0) {
         const prevFy = prevFyForLY;
 
-        // LY per category: sum flat columns from FY25_26
+        // LY target per category: sum flat columns from ts_product_commitments FY25_26
         const lyRows = prevFy
           ? await db('ts_product_commitments')
               .where({ employee_code: sr.employee_code, fiscal_year_code: prevFy })
               .groupBy('category_id')
               .select('category_id')
               .sum({ lyRev: 'target_revenue', lyQty: 'target_quantity' })
+          : [];
+
+        // LY achieved per category: from ts_yearly_target_assignments FY25_26
+        const lyAchRows = prevFy
+          ? await db('ts_yearly_target_assignments')
+              .where({ fiscal_year_code: prevFy, assignee_code: sr.employee_code })
+              .groupBy('category_name')
+              .select('category_name')
+              .sum({ lyAchRev: 'ly_achieved_value', lyAchQty: 'ly_achieved_qty' })
           : [];
 
         // CY per category: sum cyRev/cyQty from JSONB for current FY
@@ -597,17 +635,26 @@ const TBMService = {
           }
         }
 
+        // Build a map of category_name → achieved for easy lookup
+        const lyAchMap = {};
+        lyAchRows.forEach(r => {
+          if (r.category_name) {
+            lyAchMap[r.category_name.toLowerCase().replace(/[\s-]+/g, '-')] = r;
+          }
+        });
+
         const catIds = new Set([...lyRows.map(r => r.category_id), ...Object.keys(catCyMap)]);
         categoryBreakdown = Array.from(catIds).map(id => {
           const ly = lyRows.find(r => r.category_id === id) || {};
+          const lyAch = lyAchMap[id] || {};
           const cy = catCyMap[id] || {};
           return {
             id,
             name: id.charAt(0).toUpperCase() + id.slice(1).replace(/-/g, ' '),
             lyTargetValue:   parseFloat(ly.lyRev) || 0,
-            lyAchievedValue: 0,
+            lyAchievedValue: parseFloat(lyAch.lyAchRev) || 0,
             lyTarget:        parseFloat(ly.lyQty)  || 0,
-            lyAchieved:      0,
+            lyAchieved:      parseFloat(lyAch.lyAchQty) || 0,
             cyTarget:        cy.cyQty || 0,
             cyTargetValue:   cy.cyRev || 0,
           };
@@ -638,12 +685,13 @@ const TBMService = {
    * POST /tbm/yearly-targets/save
    */
   async saveYearlyTargets(tbmUser, fiscalYear, membersData) {
+    const fy = normalizeFY(fiscalYear);
     let savedCount = 0;
 
     for (const m of membersData) {
       const existing = await db('ts_yearly_target_assignments')
         .where({
-          fiscal_year_code: fiscalYear,
+          fiscal_year_code: fy,
           manager_code: tbmUser.employeeCode,
           assignee_code: m.id,
         })
@@ -683,12 +731,13 @@ const TBMService = {
    * POST /tbm/yearly-targets/publish
    */
   async publishYearlyTargets(tbmUser, fiscalYear, memberIds) {
+    const fy = normalizeFY(fiscalYear);
     let publishedCount = 0;
 
     for (const memberId of memberIds) {
       const updated = await db('ts_yearly_target_assignments')
         .where({
-          fiscal_year_code: fiscalYear,
+          fiscal_year_code: fy,
           manager_code: tbmUser.employeeCode,
           assignee_code: memberId,
         })

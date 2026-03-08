@@ -207,19 +207,28 @@ const CommitmentService = {
    * cyRev       = sum of cyRev entered by sales rep in monthly_targets (cyQty x unit_cost)
    */
   async getDashboardSummary(employeeCode) {
+    // activeFy = FY25_26 (current product commitment year — stays active always)
     const activeFy = await db('ts_fiscal_years').where('is_active', true).first();
     if (!activeFy) return null;
+
+    // nextFy = FY26_27 — yearly target assignments (ly_target_value, cy_target_value)
+    // are stored under the NEXT fiscal year, not the active one.
+    // Compute by incrementing the two digit pairs in FY25_26 → FY26_27
+    const nextFyCode = activeFy.code.replace(/FY(\d{2})_(\d{2})/, (_, y1, y2) =>
+      `FY${String(parseInt(y1) + 1).padStart(2,'0')}_${String(parseInt(y2) + 1).padStart(2,'0')}`
+    );
+    const nextFy = await db('ts_fiscal_years').where('code', nextFyCode).first();
+    const nextFyLabel = nextFy?.label || nextFyCode.replace('FY', '').replace('_', '-');
 
     const commitments = await db('ts_product_commitments')
       .where({ employee_code: employeeCode, fiscal_year_code: activeFy.code });
 
     const totals = aggregateMonthlyTargets(commitments);
 
-    // ── LY Revenue: sum flat target_revenue column (monthly_targets JSONB is empty for FY25_26 rows)
-    // Priority: (1) ts_yearly_target_assignments.ly_target_value set by TBM
-    //           (2) SUM(target_revenue) from ts_product_commitments flat column (always populated)
+    // ── LY Revenue: from ts_yearly_target_assignments under NEXT FY (ly_target_value = LY target set by TBM)
+    // Fallback to SUM(target_revenue) from ts_product_commitments flat column
     const lyAssignRow = await db('ts_yearly_target_assignments')
-      .where({ assignee_code: employeeCode, fiscal_year_code: activeFy.code })
+      .where({ assignee_code: employeeCode, fiscal_year_code: nextFyCode })
       .sum('ly_target_value as total')
       .first();
 
@@ -232,24 +241,24 @@ const CommitmentService = {
       ? parseFloat(lyAssignRow.total)
       : (lyRevFlatRow?.total ? parseFloat(lyRevFlatRow.total) : 0);
 
-    // ── CY Target: what TBM has assigned for this SR (cy_target_value)
+    // ── CY Target: TBM-assigned target stored under NEXT FY (cy_target_value)
     const cyAssignRow = await db('ts_yearly_target_assignments')
-      .where({ assignee_code: employeeCode, fiscal_year_code: activeFy.code })
+      .where({ assignee_code: employeeCode, fiscal_year_code: nextFyCode })
       .sum('cy_target_value as total')
       .first();
 
     const targetValue = (cyAssignRow?.total && parseFloat(cyAssignRow.total) > 0)
       ? parseFloat(cyAssignRow.total)
-      : 0; // 0 means TBM hasn't assigned yet — frontend shows "Not Set" for targetValue
+      : 0;
 
     return {
       ...totals,
       lyRev,
-      targetValue,  // TBM's CY target for this SR — used as overallYearlyTargetValue in grid
+      targetValue,  // TBM's CY target for this SR (from FY26_27 row)
       qtyGrowth: calcGrowth(totals.lyQty, totals.cyQty),
       revGrowth: calcGrowth(targetValue, totals.cyRev),
       aopAchievementPct: targetValue > 0 ? Math.round((totals.cyRev / targetValue) * 100) : 0,
-      fiscalYear: activeFy.label,
+      fiscalYear: nextFyLabel,   // "2026-27" — shown in grid header
       totalProducts: commitments.length,
       draftCount: commitments.filter((c) => c.status === 'draft').length,
       submittedCount: commitments.filter((c) => c.status === 'submitted').length,

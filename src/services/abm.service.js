@@ -3,7 +3,7 @@
  * ABM reviews TBM submissions, manages area-level targets, team members/yearly targets.
  */
 'use strict';
-const { db } = require('../config/database');
+const { db, getKnex } = require('../config/database');
 const { formatCommitment, aggregateMonthlyTargets, calcGrowth } = require('../utils/helpers');
 const GeographyService = require('./geography.service');
 
@@ -15,7 +15,7 @@ const getActiveFY = async () => {
 const ABMService = {
   // GET /abm/tbm-submissions
   async getTbmSubmissions(abmEmployeeCode, filters = {}) {
-    const directReports = await db.raw(`SELECT employee_code FROM aop.ts_fn_get_direct_reports(?)`, [abmEmployeeCode]);
+    const directReports = await getKnex().raw(`SELECT employee_code FROM aop.ts_fn_get_direct_reports(?::varchar)`, [abmEmployeeCode]);
     const tbmCodes = directReports.rows.map((r) => r.employee_code);
     if (tbmCodes.length === 0) return [];
     const activeFy = filters.fy || await getActiveFY();
@@ -67,7 +67,7 @@ const ABMService = {
 
   // POST /abm/bulk-approve-tbm
   async bulkApproveTbm(submissionIds, abmUser, comments = '') {
-    const directReports = await db.raw(`SELECT employee_code FROM aop.ts_fn_get_direct_reports(?)`, [abmUser.employeeCode]);
+    const directReports = await getKnex().raw(`SELECT employee_code FROM aop.ts_fn_get_direct_reports(?::varchar)`, [abmUser.employeeCode]);
     const tbmCodes = directReports.rows.map((r) => r.employee_code);
     const commitments = await db('ts_product_commitments').whereIn('id', submissionIds).where('status', 'submitted').whereIn('employee_code', tbmCodes);
     if (commitments.length === 0) throw Object.assign(new Error('No eligible submissions.'), { status: 400 });
@@ -103,7 +103,7 @@ const ABMService = {
         product_code: t.productCode, category_id: t.categoryId,
         monthly_targets: JSON.stringify(t.monthlyTargets || {}),
         set_by_code: abmUser.employeeCode, set_by_role: abmUser.role, status: 'draft',
-      }).onConflict(db.raw("(fiscal_year_code, geo_level, zone_code, COALESCE(area_code,''), COALESCE(territory_code,''), product_code)"))
+      }).onConflict(getKnex().raw("(fiscal_year_code, geo_level, zone_code, COALESCE(area_code,''), COALESCE(territory_code,''), product_code)"))
         .merge({ monthly_targets: JSON.stringify(t.monthlyTargets || {}), set_by_code: abmUser.employeeCode, set_by_role: abmUser.role, status: 'draft', updated_at: new Date() });
     }
     return { success: true, savedCount: targets.length };
@@ -118,16 +118,16 @@ const ABMService = {
 
   // GET /abm/team-members
   async getTeamMembers(abmEmployeeCode) {
-    const directReports = await db.raw(`SELECT employee_code, full_name, designation, territory_name, role FROM aop.ts_fn_get_direct_reports(?)`, [abmEmployeeCode]);
+    const directReports = await getKnex().raw(`SELECT employee_code, full_name, designation, territory_name, role FROM aop.ts_fn_get_direct_reports(?::varchar)`, [abmEmployeeCode]);
     return directReports.rows.map((r) => ({ employeeCode: r.employee_code, fullName: r.full_name, designation: r.designation, territory: r.territory_name, role: r.role }));
   },
 
   // GET /abm/tbm-hierarchy
   async getTbmHierarchy(abmEmployeeCode) {
-    const directReports = await db.raw(`SELECT employee_code, full_name, designation, territory_name, role FROM aop.ts_fn_get_direct_reports(?)`, [abmEmployeeCode]);
+    const directReports = await getKnex().raw(`SELECT employee_code, full_name, designation, territory_name, role FROM aop.ts_fn_get_direct_reports(?::varchar)`, [abmEmployeeCode]);
     const activeFy = await getActiveFY(); const result = [];
     for (const tbm of directReports.rows) {
-      const srReports = await db.raw(`SELECT employee_code FROM aop.ts_fn_get_direct_reports(?)`, [tbm.employee_code]);
+      const srReports = await getKnex().raw(`SELECT employee_code FROM aop.ts_fn_get_direct_reports(?::varchar)`, [tbm.employee_code]);
       const commitments = await db('ts_product_commitments').where({ employee_code: tbm.employee_code, fiscal_year_code: activeFy });
       result.push({ employeeCode: tbm.employee_code, fullName: tbm.full_name, designation: tbm.designation, territory: tbm.territory_name, role: tbm.role,
         salesRepCount: srReports.rows.length, totalCommitments: commitments.length,
@@ -140,7 +140,7 @@ const ABMService = {
   // GET /abm/team-yearly-targets
   async getTeamYearlyTargets(abmEmployeeCode, fiscalYear) {
     const fy = fiscalYear || await getActiveFY();
-    const directReports = await db.raw(`SELECT employee_code, full_name FROM aop.ts_fn_get_direct_reports(?)`, [abmEmployeeCode]);
+    const directReports = await getKnex().raw(`SELECT employee_code, full_name FROM aop.ts_fn_get_direct_reports(?::varchar)`, [abmEmployeeCode]);
     const assignments = await db('ts_yearly_target_assignments AS yta').leftJoin('ts_auth_users AS u', 'u.employee_code', 'yta.assignee_code')
       .where('yta.assigner_code', abmEmployeeCode).where('yta.fiscal_year_code', fy)
       .select('yta.*', 'u.full_name AS assignee_name', 'u.territory_name');
@@ -162,7 +162,7 @@ const ABMService = {
         yearly_target: t.yearlyTarget, zone_code: abmUser.zoneCode || abmUser.zone_code,
         area_code: abmUser.areaCode || abmUser.area_code, territory_code: t.territoryCode || null,
         status: 'draft', created_at: now, updated_at: now,
-      }).onConflict(db.raw("(fiscal_year_code, assigner_code, assignee_code, product_code)"))
+      }).onConflict(getKnex().raw("(fiscal_year_code, assigner_code, assignee_code, product_code)"))
         .merge({ yearly_target: t.yearlyTarget, status: 'draft', updated_at: now });
     }
     return { success: true, savedCount: targets.length };
@@ -170,14 +170,14 @@ const ABMService = {
 
   // GET /abm/unique-tbms
   async getUniqueTbms(abmEmployeeCode) {
-    const directReports = await db.raw(`SELECT employee_code, full_name, designation, territory_name FROM aop.ts_fn_get_direct_reports(?)`, [abmEmployeeCode]);
+    const directReports = await getKnex().raw(`SELECT employee_code, full_name, designation, territory_name FROM aop.ts_fn_get_direct_reports(?::varchar)`, [abmEmployeeCode]);
     return directReports.rows.map((r) => ({ employeeCode: r.employee_code, fullName: r.full_name, designation: r.designation, territory: r.territory_name }));
   },
 
   // GET /abm/dashboard-stats
   async getDashboardStats(abmEmployeeCode) {
     const activeFy = await getActiveFY();
-    const directReports = await db.raw(`SELECT employee_code FROM aop.ts_fn_get_direct_reports(?)`, [abmEmployeeCode]);
+    const directReports = await getKnex().raw(`SELECT employee_code FROM aop.ts_fn_get_direct_reports(?::varchar)`, [abmEmployeeCode]);
     const tbmCodes = directReports.rows.map((r) => r.employee_code);
     const allCodes = [...tbmCodes, abmEmployeeCode];
     const commitments = allCodes.length > 0 ? await db('ts_product_commitments').whereIn('employee_code', allCodes).where('fiscal_year_code', activeFy) : [];

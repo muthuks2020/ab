@@ -32,7 +32,18 @@ const authenticate = require('./middleware/authenticate');
 const authorize = require('./middleware/authorize');
 
 const app = express();
-app.disable('etag'); 
+app.disable('etag');
+
+// ── Disable all caching ────────────────────────────────────────────────────
+app.use((req, res, next) => {
+  res.set({
+    'Cache-Control'    : 'no-store, no-cache, must-revalidate, proxy-revalidate',
+    'Pragma'           : 'no-cache',
+    'Expires'          : '0',
+    'Surrogate-Control': 'no-store',
+  });
+  next();
+});
 const PORT = parseInt(process.env.PORT || '3001', 10);
 const API_PREFIX = process.env.API_PREFIX || '/api/v1';
 const DEMO_MODE = process.env.DEMO_MODE === 'true';

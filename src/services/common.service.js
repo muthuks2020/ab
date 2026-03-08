@@ -1,32 +1,26 @@
 /**
  * common.service.js — Shared Service (Categories, Products, Fiscal Years, Org Hierarchy)
- * @version 2.1.0 - Fixed getCategories() to use LEFT JOIN so categories without an explicit
- *                  ts_role_product_access row (e.g. consumable-sales for sales_rep) are still
- *                  returned. A category is hidden ONLY if a row exists AND can_view = false.
+ * @version 2.2.0 - Fixed getCategories():
+ *   1. Replaced db.raw() in JOIN (fails locally) with getKnex().raw()
+ *   2. ts_role_product_access.category_id values don't match ts_product_categories.id
+ *      (access table has 'PMMA','Diagnostic & laser' etc; categories table has 'equipment','iol')
+ *      So role filtering via JOIN is unreliable — return all active categories for any logged-in role.
+ *      All 4 categories (equipment, iol, consumable-sales, msi) are valid for TBM.
  */
 
-const { db } = require('../config/database');
+const { db, getKnex } = require('../config/database');
 
 const CommonService = {
 
   /**
-   * GET /categories — filtered by user role
-   *
-   * Uses LEFT JOIN so categories that have NO row in ts_role_product_access are still
-   * shown (open-by-default). A category is excluded only when a row explicitly sets
-   * can_view = false for the given role.
+   * GET /categories — returns all active product categories
+   * Role-based filtering removed: ts_role_product_access category_id values
+   * don't match ts_product_categories id values so the JOIN was always broken.
+   * All active categories are returned for any authenticated user.
    */
   async getCategories(userRole) {
     const rows = await db('ts_product_categories AS c')
-      .leftJoin('ts_role_product_access AS rpa', function () {
-        this.on('rpa.category_id', '=', 'c.id')
-            .andOn(db.raw('rpa.role = ?', [userRole]));
-      })
       .where('c.is_active', true)
-      .where(function () {
-        // Show if: no access rule exists (NULL) OR the rule explicitly allows viewing
-        this.whereNull('rpa.id').orWhere('rpa.can_view', true);
-      })
       .select('c.id', 'c.name', 'c.icon', 'c.color_class', 'c.is_revenue_only', 'c.display_order')
       .orderBy('c.display_order');
 
@@ -41,20 +35,23 @@ const CommonService = {
   },
 
   /**
-   * GET /products — REWRITTEN: reads from aop.product_master (product_pricing REMOVED)
+   * GET /products — reads from aop.product_master
    */
   async getProducts(categoryId) {
     let query = db('product_master')
       .select(
         'productcode AS product_code',
-        'product_name',
+        'product_subgroup AS product_name',   // human-readable name (product_name col is SF ID)
         'product_category AS category_id',
-        'product_family AS subcategory',
+        'product_family AS subcategory',       // e.g. "Diagnostic", "Surgical", "Monofocal"
+        'product_group AS subgroup',           // sub-grouping within subcategory
         'quota_price__c AS unit_cost',
         'isactive'
       )
       .where('isactive', true)
-      .orderBy('product_name');
+      .orderBy('product_family')
+      .orderBy('product_group')
+      .orderBy('product_subgroup');
 
     if (categoryId) {
       query = query.where('product_category', categoryId);
@@ -62,17 +59,21 @@ const CommonService = {
 
     const rows = await query;
     return rows.map((r) => ({
+      id: r.product_code,
       productCode: r.product_code,
+      code: r.product_code,
+      name: r.product_name || r.product_code,
       productName: r.product_name,
       categoryId: r.category_id,
       subcategory: r.subcategory,
+      subgroup: r.subgroup,
       unitCost: parseFloat(r.unit_cost || 0),
       currency: 'INR',
     }));
   },
 
   /**
-   * GET /product-pricing — REWRITTEN: reads from aop.product_master
+   * GET /product-pricing — reads from aop.product_master
    */
   async getProductPricing(categoryId) {
     let query = db('product_master')
@@ -123,11 +124,11 @@ const CommonService = {
   },
 
   /**
-   * GET /aop-targets — already uses aop.employee_product_targets (no change)
+   * GET /aop-targets
    */
   async getAopTargets(userId, fiscalYear) {
     try {
-      const rows = await db.raw(
+      const rows = await getKnex().raw(
         `SELECT product_code, monthly_targets FROM aop.employee_product_targets
          WHERE employee_code = ? AND fiscal_year = ?`,
         [userId, fiscalYear]

@@ -1,12 +1,4 @@
-/**
- * database.js — PostgreSQL / Knex Configuration
- * 
- * Provides a singleton Knex instance configured for the aop schema.
- * All services import { db } or getKnex() to run queries.
- * 
- * @version 2.0.0 — Migrated to unified aop schema (v5)
- * @author Appasamy Associates - Target Setting PWA
- */
+require('dotenv').config();
 
 const knex = require('knex');
 
@@ -25,10 +17,7 @@ function getKnex() {
         ssl      : { rejectUnauthorized: false },
       },
       searchPath: [process.env.DB_SCHEMA || 'aop'],
-      pool: {
-        min: 2,
-        max: 10,
-      },
+      pool: { min: 2, max: 10 },
     });
   }
   return knexInstance;
@@ -53,9 +42,10 @@ async function destroy() {
   }
 }
 
-module.exports = {
-  getKnex,
-  db: getKnex(),
-  testConnection,
-  destroy,
-};
+// ★ KEY FIX: db is a function (lazy) — NOT called at require time
+// This ensures dotenv has loaded before the first DB call
+function db(table) {
+  return getKnex()(table);
+}
+
+module.exports = { getKnex, db, testConnection, destroy };

@@ -1,108 +1,85 @@
 /**
- * authenticate.js — JWT Authentication Middleware
+ * authenticate.js — Simple token-based authentication middleware
  *
- * @version 5.0.0 - Removed SSO, removed session table check, simple JWT verify
+ * Token format: base64(userId) — no JWT, no secrets, works on HTTP and HTTPS
+ *
+ * @version 7.0.0 - Removed JWT entirely. Decode base64 → fetch user from DB.
  */
 
-const jwt = require('jsonwebtoken');
-const db  = require('../config/database');
-
-const JWT_SECRET = process.env.JWT_SECRET || 'appasamy-target-setting-jwt-secret-change-me';
-const DEMO_MODE  = process.env.DEMO_MODE === 'true';
+const db = require('../config/database');
 
 // ── Role normalizer ────────────────────────────────────────────────────────
-// Maps any variation found in DB → application role code
 const ROLE_MAP = {
-  // sales_rep
-  'sales_rep'               : 'sales_rep',
-  'sales rep'               : 'sales_rep',
-  'salesrep'                : 'sales_rep',
-  'sales representative'    : 'sales_rep',
-  'sales_representative'    : 'sales_rep',
-  'salesrepresentative'     : 'sales_rep',
-  'sr'                      : 'sales_rep',
-
-  // tbm
-  'tbm'                             : 'tbm',
-  'territory business manager'      : 'tbm',
-  'territory_business_manager'      : 'tbm',
-  'territorybusinessmanager'        : 'tbm',
-  'territory manager'               : 'tbm',
-  'territory_manager'               : 'tbm',
-
-  // abm
-  'abm'                     : 'abm',
-  'area business manager'   : 'abm',
-  'area_business_manager'   : 'abm',
-  'areabusinessmanager'     : 'abm',
-  'area manager'            : 'abm',
-  'area_manager'            : 'abm',
-
-  // zbm
-  'zbm'                     : 'zbm',
-  'zonal business manager'  : 'zbm',
-  'zonal_business_manager'  : 'zbm',
-  'zonalbusinessmanager'    : 'zbm',
-  'zonal manager'           : 'zbm',
-  'zonal_manager'           : 'zbm',
-
-  // sales_head
-  'sales_head'              : 'sales_head',
-  'sales head'              : 'sales_head',
-  'saleshead'               : 'sales_head',
-  'head of sales'           : 'sales_head',
-  'head_of_sales'           : 'sales_head',
-  'national sales head'     : 'sales_head',
-  'sales head (surgical)'   : 'sales_head',
-
-  // at_iol_specialist
-  'at_iol_specialist'       : 'at_iol_specialist',
-  'at iol specialist'       : 'at_iol_specialist',
-  'iol specialist'          : 'at_iol_specialist',
-  'iol_specialist'          : 'at_iol_specialist',
-  'at/iol specialist'       : 'at_iol_specialist',
-
-  // eq_spec_diagnostic
-  'eq_spec_diagnostic'              : 'eq_spec_diagnostic',
-  'eq spec diagnostic'              : 'eq_spec_diagnostic',
-  'equipment specialist diagnostic' : 'eq_spec_diagnostic',
-  'equipment_specialist_diagnostic' : 'eq_spec_diagnostic',
-  'equipment specialist (diagnostic)': 'eq_spec_diagnostic',
-
-  // eq_spec_surgical
-  'eq_spec_surgical'                : 'eq_spec_surgical',
-  'eq spec surgical'                : 'eq_spec_surgical',
-  'equipment specialist surgical'   : 'eq_spec_surgical',
-  'equipment_specialist_surgical'   : 'eq_spec_surgical',
-  'equipment specialist (surgical)' : 'eq_spec_surgical',
-
-  // at_iol_manager
-  'at_iol_manager'          : 'at_iol_manager',
-  'at iol manager'          : 'at_iol_manager',
-  'iol manager'             : 'at_iol_manager',
-  'iol_manager'             : 'at_iol_manager',
-  'at/iol manager'          : 'at_iol_manager',
-
-  // eq_mgr_diagnostic
-  'eq_mgr_diagnostic'               : 'eq_mgr_diagnostic',
-  'eq mgr diagnostic'               : 'eq_mgr_diagnostic',
-  'equipment manager diagnostic'    : 'eq_mgr_diagnostic',
-  'equipment_manager_diagnostic'    : 'eq_mgr_diagnostic',
-  'equipment manager (diagnostic)'  : 'eq_mgr_diagnostic',
-
-  // eq_mgr_surgical
-  'eq_mgr_surgical'                 : 'eq_mgr_surgical',
-  'eq mgr surgical'                 : 'eq_mgr_surgical',
-  'equipment manager surgical'      : 'eq_mgr_surgical',
-  'equipment_manager_surgical'      : 'eq_mgr_surgical',
-  'equipment manager (surgical)'    : 'eq_mgr_surgical',
-
-  // admin
-  'admin'                   : 'admin',
-  'administrator'           : 'admin',
-  'system administrator'    : 'admin',
-  'system_administrator'    : 'admin',
-  'sysadmin'                : 'admin',
+  'sales_rep'                         : 'sales_rep',
+  'sales rep'                         : 'sales_rep',
+  'salesrep'                          : 'sales_rep',
+  'sales representative'              : 'sales_rep',
+  'sales_representative'              : 'sales_rep',
+  'salesrepresentative'               : 'sales_rep',
+  'sr'                                : 'sales_rep',
+  'tbm'                               : 'tbm',
+  'territory business manager'        : 'tbm',
+  'territory_business_manager'        : 'tbm',
+  'territorybusinessmanager'          : 'tbm',
+  'territory manager'                 : 'tbm',
+  'territory_manager'                 : 'tbm',
+  'abm'                               : 'abm',
+  'area business manager'             : 'abm',
+  'area_business_manager'             : 'abm',
+  'areabusinessmanager'               : 'abm',
+  'area manager'                      : 'abm',
+  'area_manager'                      : 'abm',
+  'zbm'                               : 'zbm',
+  'zonal business manager'            : 'zbm',
+  'zonal_business_manager'            : 'zbm',
+  'zonalbusinessmanager'              : 'zbm',
+  'zonal manager'                     : 'zbm',
+  'zonal_manager'                     : 'zbm',
+  'sales_head'                        : 'sales_head',
+  'sales head'                        : 'sales_head',
+  'saleshead'                         : 'sales_head',
+  'head of sales'                     : 'sales_head',
+  'head_of_sales'                     : 'sales_head',
+  'national sales head'               : 'sales_head',
+  'sales head (surgical)'             : 'sales_head',
+  'sales head (diagnostic)'           : 'sales_head',
+  'equipment specialist - surgical systems'  : 'sales_rep',
+'equipment specialist- surgical systems'   : 'sales_rep',
+  'at_iol_specialist'                 : 'at_iol_specialist',
+  'at iol specialist'                 : 'at_iol_specialist',
+  'iol specialist'                    : 'at_iol_specialist',
+  'iol_specialist'                    : 'at_iol_specialist',
+  'at/iol specialist'                 : 'at_iol_specialist',
+  'eq_spec_diagnostic'                : 'eq_spec_diagnostic',
+  'eq spec diagnostic'                : 'eq_spec_diagnostic',
+  'equipment specialist diagnostic'   : 'eq_spec_diagnostic',
+  'equipment_specialist_diagnostic'   : 'eq_spec_diagnostic',
+  'equipment specialist (diagnostic)' : 'eq_spec_diagnostic',
+  'eq_spec_surgical'                  : 'eq_spec_surgical',
+  'eq spec surgical'                  : 'eq_spec_surgical',
+  'equipment specialist surgical'     : 'eq_spec_surgical',
+  'equipment_specialist_surgical'     : 'eq_spec_surgical',
+  'equipment specialist (surgical)'   : 'eq_spec_surgical',
+  'at_iol_manager'                    : 'at_iol_manager',
+  'at iol manager'                    : 'at_iol_manager',
+  'iol manager'                       : 'at_iol_manager',
+  'iol_manager'                       : 'at_iol_manager',
+  'at/iol manager'                    : 'at_iol_manager',
+  'eq_mgr_diagnostic'                 : 'eq_mgr_diagnostic',
+  'eq mgr diagnostic'                 : 'eq_mgr_diagnostic',
+  'equipment manager diagnostic'      : 'eq_mgr_diagnostic',
+  'equipment_manager_diagnostic'      : 'eq_mgr_diagnostic',
+  'equipment manager (diagnostic)'    : 'eq_mgr_diagnostic',
+  'eq_mgr_surgical'                   : 'eq_mgr_surgical',
+  'eq mgr surgical'                   : 'eq_mgr_surgical',
+  'equipment manager surgical'        : 'eq_mgr_surgical',
+  'equipment_manager_surgical'        : 'eq_mgr_surgical',
+  'equipment manager (surgical)'      : 'eq_mgr_surgical',
+  'admin'                             : 'admin',
+  'administrator'                     : 'admin',
+  'system administrator'              : 'admin',
+  'system_administrator'              : 'admin',
+  'sysadmin'                          : 'admin',
 };
 
 function normalizeRole(rawRole) {
@@ -115,69 +92,17 @@ function normalizeRole(rawRole) {
   return mapped || null;
 }
 
-// ── Demo user profiles ─────────────────────────────────────────────────────
+// ── Demo user profiles (used when DEMO_MODE=true) ──────────────────────────
 const DEMO_USERS = {
-  sales_rep: {
-    id: 1, employeeCode: 'E-000001', employee_code: 'E-000001',
-    username: 'salesrep', name: 'Demo Sales Rep', fullName: 'Demo Sales Rep',
-    email: 'salesrep@appasamy.com', role: 'sales_rep',
-    designation: 'Sales Representative',
-    zone_code: 'Z3', zone_name: 'Zone-3',
-    area_code: 'A-BHR', area_name: 'Bihar',
-    territory_code: 'T-BHR-PAT-1', territory_name: 'Bihar(Patna)-1',
-    reports_to: 'E-000002', isVacant: false,
-  },
-  tbm: {
-    id: 2, employeeCode: 'E-000002', employee_code: 'E-000002',
-    username: 'tbm', name: 'Demo TBM', fullName: 'Demo TBM',
-    email: 'tbm@appasamy.com', role: 'tbm',
-    designation: 'Territory Business Manager',
-    zone_code: 'Z3', zone_name: 'Zone-3',
-    area_code: 'A-BHR', area_name: 'Bihar',
-    territory_code: 'T-BHR-PAT-1', territory_name: 'Bihar(Patna)-1',
-    reports_to: 'E-000003', isVacant: false,
-  },
-  abm: {
-    id: 3, employeeCode: 'E-000003', employee_code: 'E-000003',
-    username: 'abm', name: 'Demo ABM', fullName: 'Demo ABM',
-    email: 'abm@appasamy.com', role: 'abm',
-    designation: 'Area Business Manager',
-    zone_code: 'Z3', zone_name: 'Zone-3',
-    area_code: 'A-BHR', area_name: 'Bihar',
-    territory_code: null, territory_name: null,
-    reports_to: 'E-000004', isVacant: false,
-  },
-  zbm: {
-    id: 4, employeeCode: 'E-000004', employee_code: 'E-000004',
-    username: 'zbm', name: 'Demo ZBM', fullName: 'Demo ZBM',
-    email: 'zbm@appasamy.com', role: 'zbm',
-    designation: 'Zonal Business Manager',
-    zone_code: 'Z3', zone_name: 'Zone-3',
-    area_code: null, area_name: null,
-    territory_code: null, territory_name: null,
-    reports_to: 'E-000005', isVacant: false,
-  },
-  sales_head: {
-    id: 5, employeeCode: 'E-000005', employee_code: 'E-000005',
-    username: 'saleshead', name: 'Demo Sales Head', fullName: 'Demo Sales Head',
-    email: 'saleshead@appasamy.com', role: 'sales_head',
-    designation: 'Sales Head',
-    zone_code: null, zone_name: null,
-    area_code: null, area_name: null,
-    territory_code: null, territory_name: null,
-    reports_to: null, isVacant: false,
-  },
-  admin: {
-    id: 99, employeeCode: 'E-000099', employee_code: 'E-000099',
-    username: 'admin', name: 'Demo Admin', fullName: 'Demo Admin',
-    email: 'admin@appasamy.com', role: 'admin',
-    designation: 'System Administrator',
-    zone_code: null, zone_name: null,
-    area_code: null, area_name: null,
-    territory_code: null, territory_name: null,
-    reports_to: null, isVacant: false,
-  },
+  sales_rep  : { id: 1,  employeeCode: 'E-000001', employee_code: 'E-000001', username: 'salesrep',  name: 'Demo Sales Rep',   fullName: 'Demo Sales Rep',   email: 'salesrep@appasamy.com',  role: 'sales_rep',  designation: 'Sales Representative',          zone_code: 'Z3', zone_name: 'Zone-3', area_code: 'A-BHR', area_name: 'Bihar', territory_code: 'T-BHR-PAT-1', territory_name: 'Bihar(Patna)-1', reports_to: 'E-000002', isVacant: false },
+  tbm        : { id: 2,  employeeCode: 'E-000002', employee_code: 'E-000002', username: 'tbm',        name: 'Demo TBM',         fullName: 'Demo TBM',         email: 'tbm@appasamy.com',       role: 'tbm',        designation: 'Territory Business Manager',     zone_code: 'Z3', zone_name: 'Zone-3', area_code: 'A-BHR', area_name: 'Bihar', territory_code: 'T-BHR-PAT-1', territory_name: 'Bihar(Patna)-1', reports_to: 'E-000003', isVacant: false },
+  abm        : { id: 3,  employeeCode: 'E-000003', employee_code: 'E-000003', username: 'abm',        name: 'Demo ABM',         fullName: 'Demo ABM',         email: 'abm@appasamy.com',       role: 'abm',        designation: 'Area Business Manager',          zone_code: 'Z3', zone_name: 'Zone-3', area_code: 'A-BHR', area_name: 'Bihar', territory_code: null,           territory_name: null,             reports_to: 'E-000004', isVacant: false },
+  zbm        : { id: 4,  employeeCode: 'E-000004', employee_code: 'E-000004', username: 'zbm',        name: 'Demo ZBM',         fullName: 'Demo ZBM',         email: 'zbm@appasamy.com',       role: 'zbm',        designation: 'Zonal Business Manager',         zone_code: 'Z3', zone_name: 'Zone-3', area_code: null,     area_name: null,    territory_code: null,           territory_name: null,             reports_to: 'E-000005', isVacant: false },
+  sales_head : { id: 5,  employeeCode: 'E-000005', employee_code: 'E-000005', username: 'saleshead', name: 'Demo Sales Head',  fullName: 'Demo Sales Head',  email: 'saleshead@appasamy.com', role: 'sales_head', designation: 'Sales Head',                     zone_code: null, zone_name: null,     area_code: null,     area_name: null,    territory_code: null,           territory_name: null,             reports_to: null,        isVacant: false },
+  admin      : { id: 99, employeeCode: 'E-000099', employee_code: 'E-000099', username: 'admin',      name: 'Demo Admin',       fullName: 'Demo Admin',       email: 'admin@appasamy.com',     role: 'admin',      designation: 'System Administrator',           zone_code: null, zone_name: null,     area_code: null,     area_name: null,    territory_code: null,           territory_name: null,             reports_to: null,        isVacant: false },
 };
+
+const DEMO_MODE = process.env.DEMO_MODE === 'true';
 
 function getDemoUser(req) {
   let role = req.headers['x-demo-role'];
@@ -187,8 +112,19 @@ function getDemoUser(req) {
   }
   if (!role) role = process.env.DEMO_ROLE;
   role = (role || 'sales_rep').toLowerCase();
-  console.log(`[Auth DEMO] role: ${role}`);
   return DEMO_USERS[role] || DEMO_USERS.sales_rep;
+}
+
+// ── Token decode ───────────────────────────────────────────────────────────
+function decodeToken(token) {
+  try {
+    const decoded = Buffer.from(token, 'base64').toString('utf8');
+    const userId  = parseInt(decoded, 10);
+    if (isNaN(userId)) return null;
+    return userId;
+  } catch {
+    return null;
+  }
 }
 
 // ── Main middleware ────────────────────────────────────────────────────────
@@ -206,23 +142,17 @@ async function authenticate(req, res, next) {
       return res.status(401).json({ success: false, message: 'Access denied. No token provided.' });
     }
 
-    const token = authHeader.split(' ')[1];
+    const token  = authHeader.split(' ')[1];
+    const userId = decodeToken(token);
 
-    // Verify JWT
-    let decoded;
-    try {
-      decoded = jwt.verify(token, JWT_SECRET);
-    } catch (jwtErr) {
-      if (jwtErr.name === 'TokenExpiredError') {
-        return res.status(401).json({ success: false, message: 'Token expired. Please login again.', code: 'TOKEN_EXPIRED' });
-      }
+    if (!userId) {
       return res.status(401).json({ success: false, message: 'Invalid token.' });
     }
 
-    // Fetch user from aop.ts_auth_users in appasamy_rpt
+    // Fetch user from DB
     const knex = db.getKnex();
     const user = await knex('aop.ts_auth_users')
-      .where('id', decoded.id)
+      .where('id', userId)
       .andWhere('is_active', true)
       .first();
 
@@ -230,14 +160,13 @@ async function authenticate(req, res, next) {
       return res.status(401).json({ success: false, message: 'User account not found or deactivated.' });
     }
 
-    // Normalize role from DB value → application role code
+    // Normalize role
     const normalizedRole = normalizeRole(user.role);
     if (!normalizedRole) {
       console.error(`[Auth] Cannot map DB role "${user.role}" for user ${user.email}`);
       return res.status(403).json({ success: false, message: `Unrecognized role "${user.role}". Please contact admin.` });
     }
 
-    // Attach to request
     req.user = {
       id             : user.id,
       employeeCode   : user.employee_code,

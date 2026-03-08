@@ -1,19 +1,5 @@
-/**
- * auth.controller.js — Email + Password Authentication
- *
- * Login  : POST /auth/login       { email, password }
- * Logout : POST /auth/logout
- * Me     : GET  /auth/me
- *
- * @version 5.0.0 - Email login, no SSO, simple JWT
- */
 
-const jwt    = require('jsonwebtoken');
-const bcrypt = require('bcrypt');
-const db     = require('../config/database');
-
-const JWT_SECRET = process.env.JWT_SECRET || 'appasamy-target-setting-jwt-secret-change-me';
-const JWT_EXPIRY = process.env.JWT_EXPIRY  || '8h';
+const db = require('../config/database');
 
 const ROLE_LABELS = {
   sales_rep          : 'Sales Representative',
@@ -30,15 +16,80 @@ const ROLE_LABELS = {
   eq_mgr_surgical    : 'Equipment Manager (Surgical)',
 };
 
+// Must mirror authenticate.js ROLE_MAP exactly
+const ROLE_MAP = {
+  'sales_rep'                         : 'sales_rep',
+  'sales rep'                         : 'sales_rep',
+  'salesrep'                          : 'sales_rep',
+  'sales representative'              : 'sales_rep',
+  'sales_representative'              : 'sales_rep',
+  'sr'                                : 'sales_rep',
+  'tbm'                               : 'tbm',
+  'territory business manager'        : 'tbm',
+  'territory_business_manager'        : 'tbm',
+  'territory manager'                 : 'tbm',
+  'abm'                               : 'abm',
+  'area business manager'             : 'abm',
+  'area_business_manager'             : 'abm',
+  'area manager'                      : 'abm',
+  'zbm'                               : 'zbm',
+  'zonal business manager'            : 'zbm',
+  'zonal_business_manager'            : 'zbm',
+  'zonal manager'                     : 'zbm',
+  'sales_head'                        : 'sales_head',
+  'sales head'                        : 'sales_head',
+  'saleshead'                         : 'sales_head',
+  'head of sales'                     : 'sales_head',
+  'national sales head'               : 'sales_head',
+  'sales head (surgical)'             : 'sales_head',
+  'sales head (diagnostic)'           : 'sales_head',
+  'sales head surgical'               : 'sales_head',
+  'sales head diagnostic'             : 'sales_head',
+  'at_iol_specialist'                 : 'at_iol_specialist',
+  'at iol specialist'                 : 'at_iol_specialist',
+  'iol specialist'                    : 'at_iol_specialist',
+  'at/iol specialist'                 : 'at_iol_specialist',
+  'eq_spec_diagnostic'                : 'eq_spec_diagnostic',
+  'equipment specialist diagnostic'   : 'eq_spec_diagnostic',
+  'equipment specialist (diagnostic)' : 'eq_spec_diagnostic',
+  'eq_spec_surgical'                  : 'eq_spec_surgical',
+  'equipment specialist surgical'     : 'eq_spec_surgical',
+  'equipment specialist (surgical)'   : 'eq_spec_surgical',
+  'at_iol_manager'                    : 'at_iol_manager',
+  'at iol manager'                    : 'at_iol_manager',
+  'iol manager'                       : 'at_iol_manager',
+  'at/iol manager'                    : 'at_iol_manager',
+  'eq_mgr_diagnostic'                 : 'eq_mgr_diagnostic',
+  'equipment manager diagnostic'      : 'eq_mgr_diagnostic',
+  'equipment manager (diagnostic)'    : 'eq_mgr_diagnostic',
+  'eq_mgr_surgical'                   : 'eq_mgr_surgical',
+  'equipment manager surgical'        : 'eq_mgr_surgical',
+  'equipment manager (surgical)'      : 'eq_mgr_surgical',
+  'admin'                             : 'admin',
+  'administrator'                     : 'admin',
+  'system administrator'              : 'admin',
+  'sysadmin'                          : 'admin',
+};
+
+function normalizeRole(raw) {
+  if (!raw) return null;
+  return ROLE_MAP[raw.trim().toLowerCase()] || null;
+}
+
+// Simple token: base64(userId) — no JWT, no secret, HTTP/HTTPS agnostic
+function makeToken(userId) {
+  return Buffer.from(String(userId)).toString('base64');
+}
+
 // ═══════════════════════════════════════════════════════════════════
 // POST /auth/login
 // ═══════════════════════════════════════════════════════════════════
 async function login(req, res) {
   try {
-    const { email, password } = req.body;
+    const { email } = req.body;
 
-    if (!email || !password) {
-      return res.status(400).json({ success: false, message: 'Email and password are required' });
+    if (!email) {
+      return res.status(400).json({ success: false, message: 'Email is required' });
     }
 
     const knex = db.getKnex();
@@ -48,22 +99,15 @@ async function login(req, res) {
       .andWhere('is_active', true)
       .first();
 
-    if (!user || !user.password_hash) {
-      return res.status(401).json({ success: false, message: 'Invalid email or password' });
+    if (!user) {
+      return res.status(401).json({ success: false, message: 'No active account found for this email' });
     }
-
-    const isValid = await bcrypt.compare(password, user.password_hash);
-    if (!isValid) {
-      return res.status(401).json({ success: false, message: 'Invalid email or password' });
-    }
-
-    const token = jwt.sign(
-      { id: user.id, email: user.email, role: user.role, employeeCode: user.employee_code },
-      JWT_SECRET,
-      { expiresIn: JWT_EXPIRY }
-    );
 
     await knex('aop.ts_auth_users').where('id', user.id).update({ last_login_at: new Date() });
+
+    const token = makeToken(user.id);
+
+    console.log(`[Auth] Login: ${user.email} → role="${user.role}" → normalized="${normalizeRole(user.role)}"`);
 
     return res.json({ success: true, token, user: formatUser(user) });
 
@@ -104,9 +148,10 @@ async function me(req, res) {
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// HELPER
+// HELPER — always returns normalized role
 // ═══════════════════════════════════════════════════════════════════
 function formatUser(user) {
+  const normalizedRole = normalizeRole(user.role) || user.role;
   return {
     id             : user.id,
     employee_code  : user.employee_code,
@@ -115,8 +160,8 @@ function formatUser(user) {
     fullName       : user.full_name,
     username       : user.username,
     email          : user.email,
-    role           : user.role,
-    roleLabel      : ROLE_LABELS[user.role] || user.role,
+    role           : normalizedRole,                          // ← always "sales_rep", "tbm" etc.
+    roleLabel      : ROLE_LABELS[normalizedRole] || user.role,
     designation    : user.designation,
     territory      : user.territory_name || user.area_name || user.zone_name || 'Unassigned',
     zone_code      : user.zone_code,

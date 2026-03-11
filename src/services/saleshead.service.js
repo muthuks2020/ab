@@ -1,19 +1,16 @@
-/**
- * saleshead.service.js — Sales Head Service (v5)
- * SH reviews ZBM submissions, manages zone-level geography targets, team yearly targets.
- */
 'use strict';
-const { db } = require('../config/database');
+const { db, getKnex } = require('../config/database');
 const { formatCommitment, aggregateMonthlyTargets, calcGrowth, MONTHS } = require('../utils/helpers');
 const GeographyService = require('./geography.service');
 
 const getActiveFY = async () => {
-  const fy = await db('ts_fiscal_years').where({ is_active: true }).first();
+  const fy = await db('ts_fiscal_years').where({ is_active: true }).orderBy('code', 'desc').first();
+  console.log('[getActiveFY] resolved FY:', fy?.code);
   return fy?.code || 'FY26_27';
 };
 
 const SalesHeadService = {
-  // GET /saleshead/zbm-submissions
+
   async getZbmSubmissions(filters = {}) {
     const activeFy = filters.fy || await getActiveFY();
     let query = db('ts_product_commitments AS pc')
@@ -29,7 +26,6 @@ const SalesHeadService = {
     return rows.map(formatCommitment);
   },
 
-  // PUT /saleshead/approve-zbm/:id
   async approveZbm(commitmentId, shUser, { comments = '', corrections = null } = {}) {
     const commitment = await db('ts_product_commitments').where({ id: commitmentId }).first();
     if (!commitment) throw Object.assign(new Error('Commitment not found.'), { status: 404 });
@@ -47,7 +43,6 @@ const SalesHeadService = {
     return { success: true, submissionId: commitmentId, action };
   },
 
-  // POST /saleshead/reject-zbm/:id
   async rejectZbm(commitmentId, shUser, reason = '') {
     const commitment = await db('ts_product_commitments').where({ id: commitmentId }).first();
     if (!commitment) throw Object.assign(new Error('Commitment not found.'), { status: 404 });
@@ -57,7 +52,6 @@ const SalesHeadService = {
     return { success: true, submissionId: commitmentId, action: 'rejected' };
   },
 
-  // POST /saleshead/bulk-approve-zbm
   async bulkApproveZbm(submissionIds, shUser, comments = '') {
     const commitments = await db('ts_product_commitments').whereIn('id', submissionIds).where('status', 'submitted');
     if (commitments.length === 0) throw Object.assign(new Error('No eligible submissions.'), { status: 400 });
@@ -67,33 +61,130 @@ const SalesHeadService = {
     return { success: true, approvedCount: ids.length };
   },
 
-  // GET /saleshead/zbm-hierarchy
   async getZbmHierarchy(shEmployeeCode) {
-    const subordinates = await db.raw(`SELECT employee_code, full_name, designation, zone_name, role FROM aop.ts_fn_get_subordinates(?)`, [shEmployeeCode]);
-    const zbms = subordinates.rows.filter((r) => r.role === 'zbm');
-    const activeFy = await getActiveFY(); const result = [];
-    for (const zbm of zbms) {
-      const zbmSubs = await db.raw(`SELECT employee_code FROM aop.ts_fn_get_subordinates(?)`, [zbm.employee_code]);
-      const allCodes = zbmSubs.rows.map(r => r.employee_code).concat(zbm.employee_code);
-      const commitments = await db('ts_product_commitments').whereIn('employee_code', allCodes).where('fiscal_year_code', activeFy);
-      result.push({ employeeCode: zbm.employee_code, fullName: zbm.full_name, designation: zbm.designation, zone: zbm.zone_name, role: zbm.role,
-        subordinateCount: zbmSubs.rows.length, totalCommitments: commitments.length,
-        submitted: commitments.filter((c) => c.status === 'submitted').length,
-        approved: commitments.filter((c) => c.status === 'approved').length });
+    console.log('[getZbmHierarchy] building nested hierarchy for:', shEmployeeCode);
+    const activeFy = await getActiveFY();
+    console.log('[getZbmHierarchy] activeFy:', activeFy);
+
+    // Get direct reports of any employee via reports_to
+    const getDirectReports = async (empCode) => {
+      const res = await getKnex().raw(
+        `SELECT employee_code, full_name, designation, zone_name, area_name, territory_name, role
+         FROM aop.ts_auth_users WHERE reports_to = ? AND is_active = true`,
+        [empCode]
+      );
+      return res.rows;
+    };
+
+    // Get product commitments for a sales rep
+    const getRepCommitments = async (empCode) => {
+      const rows = await db('ts_product_commitments AS pc')
+        .leftJoin('product_master AS pm', 'pm.productcode', 'pc.product_code')
+        .where('pc.employee_code', empCode)
+        .where('pc.fiscal_year_code', activeFy)
+        .select('pc.id', 'pc.product_code', 'pc.monthly_targets', 'pc.status',
+          'pm.product_name', 'pm.product_category');
+      return rows.map(r => ({
+        productId: r.product_code,
+        productName: r.product_name || r.product_code,
+        category: r.product_category,
+        status: r.status,
+        monthlyTargets: r.monthly_targets || {},
+      }));
+    };
+
+    const ZBM_ROLES = ['zbm', 'zonal business manager', 'zonal_business_manager', 'zonal manager'];
+    const ABM_ROLES = ['abm', 'area business manager', 'area_business_manager', 'area manager'];
+    const TBM_ROLES = ['tbm', 'territory business manager', 'territory_business_manager', 'territory manager'];
+    const SR_ROLES  = ['sales_rep', 'sales rep', 'sr', 'sales representative', 'sales_representative',
+                       'equipment specialist - surgical systems', 'equipment specialist- surgical systems'];
+    const isRole = (role, list) => list.includes((role || '').toLowerCase().trim());
+
+    const shDirectReports = await getDirectReports(shEmployeeCode);
+    console.log('[getZbmHierarchy] SH direct reports:', shDirectReports.length,
+      shDirectReports.map(r => `${r.employee_code}:${r.role}`));
+
+    const zbmRows = shDirectReports.filter(r => isRole(r.role, ZBM_ROLES));
+    console.log('[getZbmHierarchy] ZBMs found:', zbmRows.length);
+
+    const result = [];
+    for (const zbm of zbmRows) {
+      const abmRows = await getDirectReports(zbm.employee_code);
+      console.log(`[getZbmHierarchy] ZBM ${zbm.employee_code} ABMs:`, abmRows.length);
+
+      const abms = [];
+      for (const abm of abmRows.filter(r => isRole(r.role, ABM_ROLES))) {
+        const tbmRows = await getDirectReports(abm.employee_code);
+        console.log(`[getZbmHierarchy] ABM ${abm.employee_code} TBMs:`, tbmRows.length);
+
+        const tbms = [];
+        for (const tbm of tbmRows.filter(r => isRole(r.role, TBM_ROLES))) {
+          const srRows = await getDirectReports(tbm.employee_code);
+          console.log(`[getZbmHierarchy] TBM ${tbm.employee_code} SRs:`, srRows.length);
+
+          const salesReps = [];
+          for (const sr of srRows.filter(r => isRole(r.role, SR_ROLES))) {
+            const products = await getRepCommitments(sr.employee_code);
+            salesReps.push({
+              id: sr.employee_code,
+              employeeCode: sr.employee_code,
+              name: sr.full_name,
+              fullName: sr.full_name,
+              designation: sr.designation,
+              territory: sr.territory_name || sr.area_name || sr.zone_name,
+              zone: sr.zone_name,
+              products,
+            });
+          }
+
+          tbms.push({
+            id: tbm.employee_code,
+            employeeCode: tbm.employee_code,
+            name: tbm.full_name,
+            fullName: tbm.full_name,
+            designation: tbm.designation,
+            territory: tbm.area_name || tbm.zone_name,
+            zone: tbm.zone_name,
+            salesReps,
+          });
+        }
+
+        abms.push({
+          id: abm.employee_code,
+          employeeCode: abm.employee_code,
+          name: abm.full_name,
+          fullName: abm.full_name,
+          designation: abm.designation,
+          territory: abm.area_name || abm.zone_name,
+          zone: abm.zone_name,
+          tbms,
+        });
+      }
+
+      result.push({
+        id: zbm.employee_code,
+        employeeCode: zbm.employee_code,
+        name: zbm.full_name,
+        fullName: zbm.full_name,
+        designation: zbm.designation,
+        territory: zbm.zone_name,
+        zone: zbm.zone_name,
+        abms,
+      });
     }
+
+    console.log('[getZbmHierarchy] final result:', result.length, 'ZBMs');
     return result;
   },
 
-  // GET /saleshead/team-members
   async getTeamMembers(shEmployeeCode) {
-    const directReports = await db.raw(`SELECT employee_code, full_name, designation, zone_name, role FROM aop.ts_fn_get_direct_reports(?)`, [shEmployeeCode]);
+    const directReports = await getKnex().raw(`SELECT employee_code, full_name, designation, zone_name, role FROM aop.ts_fn_get_direct_reports(?)`, [shEmployeeCode]);
     return directReports.rows.map((r) => ({ employeeCode: r.employee_code, fullName: r.full_name, designation: r.designation, zone: r.zone_name, role: r.role }));
   },
 
-  // GET /saleshead/team-yearly-targets
   async getTeamYearlyTargets(shEmployeeCode, fiscalYear) {
     const fy = fiscalYear || await getActiveFY();
-    const directReports = await db.raw(`SELECT employee_code, full_name FROM aop.ts_fn_get_direct_reports(?)`, [shEmployeeCode]);
+    const directReports = await getKnex().raw(`SELECT employee_code, full_name FROM aop.ts_fn_get_direct_reports(?)`, [shEmployeeCode]);
     const assignments = await db('ts_yearly_target_assignments AS yta').leftJoin('ts_auth_users AS u', 'u.employee_code', 'yta.assignee_code')
       .where('yta.assigner_code', shEmployeeCode).where('yta.fiscal_year_code', fy)
       .select('yta.*', 'u.full_name AS assignee_name', 'u.zone_name');
@@ -105,7 +196,6 @@ const SalesHeadService = {
     return { fiscalYear: fy, members };
   },
 
-  // POST /saleshead/team-yearly-targets/save
   async saveTeamYearlyTargets(targets, shUser, fiscalYear) {
     const fy = fiscalYear || await getActiveFY(); const now = new Date();
     for (const t of targets) {
@@ -113,24 +203,25 @@ const SalesHeadService = {
         fiscal_year_code: fy, assigner_code: shUser.employeeCode, assigner_role: shUser.role,
         assignee_code: t.employeeCode, product_code: t.productCode, category_id: t.categoryId,
         yearly_target: t.yearlyTarget, zone_code: t.zoneCode || null, status: 'draft', created_at: now, updated_at: now,
-      }).onConflict(db.raw("(fiscal_year_code, assigner_code, assignee_code, product_code)"))
+      }).onConflict(getKnex().raw("(fiscal_year_code, assigner_code, assignee_code, product_code)"))
         .merge({ yearly_target: t.yearlyTarget, status: 'draft', updated_at: now });
     }
     return { success: true, savedCount: targets.length };
   },
 
-  // GET /saleshead/unique-zbms
   async getUniqueZbms(shEmployeeCode) {
-    const directReports = await db.raw(`SELECT employee_code, full_name, designation, zone_name FROM aop.ts_fn_get_direct_reports(?)`, [shEmployeeCode]);
+    const directReports = await getKnex().raw(`SELECT employee_code, full_name, designation, zone_name FROM aop.ts_fn_get_direct_reports(?)`, [shEmployeeCode]);
     return directReports.rows.map((r) => ({ employeeCode: r.employee_code, fullName: r.full_name, designation: r.designation, zone: r.zone_name }));
   },
 
-  // GET /saleshead/dashboard-stats
   async getDashboardStats(shEmployeeCode) {
+    console.log('[getDashboardStats] called with shEmployeeCode:', shEmployeeCode);
     const activeFy = await getActiveFY();
     const commitments = await db('ts_product_commitments').where('fiscal_year_code', activeFy);
+    console.log('[getDashboardStats] commitments for', activeFy, ':', commitments.length);
     const totals = aggregateMonthlyTargets(commitments);
-    const zbms = await db('ts_auth_users').where({ role: 'zbm', is_active: true });
+    const zbms = await db('ts_auth_users').whereRaw("LOWER(TRIM(role)) IN ('zbm','zonal business manager','zonal_business_manager','zonal manager')").where({ is_active: true });
+    console.log('[getDashboardStats] ZBMs found:', zbms.length);
     return { totalZbms: zbms.length, totalCommitments: commitments.length,
       pending: commitments.filter((c) => c.status === 'submitted').length,
       approved: commitments.filter((c) => c.status === 'approved').length,
@@ -138,7 +229,6 @@ const SalesHeadService = {
       revGrowth: calcGrowth(totals.lyRev, totals.cyRev), qtyGrowth: calcGrowth(totals.lyQty, totals.cyQty) };
   },
 
-  // GET /saleshead/regional-performance
   async getRegionalPerformance() {
     const activeFy = await getActiveFY();
     const zones = await db('ts_product_commitments').where('fiscal_year_code', activeFy).whereNotNull('zone_code')
@@ -154,7 +244,6 @@ const SalesHeadService = {
     return result;
   },
 
-  // GET /saleshead/monthly-trend
   async getMonthlyTrend(fiscalYear) {
     const fy = fiscalYear || await getActiveFY();
     const commitments = await db('ts_product_commitments').where({ fiscal_year_code: fy, status: 'approved' });
@@ -167,33 +256,42 @@ const SalesHeadService = {
     return trend;
   },
 
-  // POST /saleshead/geography-targets
   async setGeographyTargets(shUser, geoData) {
     return GeographyService.setGeographyTargets(geoData.geoLevel || 'zone', geoData.geoCode, geoData.geoName, geoData.fiscalYear, geoData.targets, shUser.employeeCode);
   },
 
-  // GET /saleshead/categories — delegate to common
   async getCategories(role) {
-    const rows = await db('ts_product_categories AS c')
-      .join('ts_role_product_access AS rpa', 'rpa.category_id', 'c.id')
-      .where('rpa.role', role || 'sales_head')
-      .where('c.is_active', true)
-      .select('c.*');
-    return rows;
+    console.log('[getCategories] called with role:', role);
+    try {
+      const categories = await db('ts_product_categories')
+        .where('is_active', true)
+        .select('id', 'name', 'icon', 'color_class', 'is_revenue_only', 'display_order')
+        .orderBy('display_order');
+      console.log('[getCategories] rows returned:', categories.length);
+      return categories.map((r) => ({
+        id: r.id,
+        name: r.name,
+        icon: r.icon,
+        color: r.color_class,
+        isRevenueOnly: r.is_revenue_only,
+        displayOrder: r.display_order,
+      }));
+    } catch (err) {
+      console.error('[getCategories] ERROR:', err.message);
+      throw err;
+    }
   },
 
-  // GET /saleshead/analytics/distribution — zone-wise distribution of commitments
-  async getAnalyticsDistribution(filters = {}) {
+    async getAnalyticsDistribution(filters = {}) {
     const activeFy = filters.fy || await getActiveFY();
     const rows = await db('ts_product_commitments').where('fiscal_year_code', activeFy)
       .whereNotNull('zone_code').select('zone_code', 'zone_name')
-      .count('id as total').sum(db.raw("(monthly_targets->>'apr'->>'cyRev')::numeric as revenue"))
+      .count('id as total').sum(getKnex().raw("(monthly_targets->>'apr'->>'cyRev')::numeric as revenue"))
       .groupBy('zone_code', 'zone_name');
     return rows.length > 0 ? rows : await db('ts_product_commitments').where('fiscal_year_code', activeFy)
       .whereNotNull('zone_code').select('zone_code', 'zone_name').groupBy('zone_code', 'zone_name');
   },
 
-  // GET /saleshead/analytics/comparison — zone-wise LY vs CY comparison
   async getAnalyticsComparison(filters = {}) {
     const activeFy = filters.fy || await getActiveFY();
     const zones = await db('ts_product_commitments').where('fiscal_year_code', activeFy).whereNotNull('zone_code')
@@ -207,7 +305,6 @@ const SalesHeadService = {
     return result;
   },
 
-  // GET /saleshead/analytics/achievement — achievement rate per zone
   async getAnalyticsAchievement(filters = {}) {
     const activeFy = filters.fy || await getActiveFY();
     const zones = await db('ts_product_commitments').where('fiscal_year_code', activeFy).whereNotNull('zone_code')

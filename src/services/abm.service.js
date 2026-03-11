@@ -1,6 +1,12 @@
 /**
- * abm.service.js — Area Business Manager Service (v5)
- * ABM reviews TBM submissions, manages area-level targets, team members/yearly targets.
+ * abm.service.js — Area Business Manager Service (v6 — FIXED)
+ *
+ * FIXES IN THIS VERSION:
+ * 1. Replaced ts_fn_get_direct_reports DB function with inline reports_to query
+ *    (same fix applied to ZBM). Falls back to area_code when reporting chain
+ *    is not configured in the DB.
+ * 2. getAreaTargets now loads ALL active products from product_master and merges
+ *    in existing CY commitments + LY geography targets — mirrors TBM pattern.
  */
 'use strict';
 const { db, getKnex } = require('../config/database');
@@ -12,11 +18,79 @@ const getActiveFY = async () => {
   return fy?.code || 'FY26_27';
 };
 
+/* ─── inline helper: direct reports via reports_to (no DB function needed) ─── */
+
+/**
+ * Returns all users who directly report to managerEmpCode.
+ * Primary path: reports_to column.
+ * Fallback: users in the same area_code when chain is not configured.
+ */
+async function getAbmDirectReports(abmEmployeeCode) {
+  const reports = await db('ts_auth_users')
+    .where({ reports_to: abmEmployeeCode, is_active: true })
+    .select(
+      'employee_code', 'full_name',
+      getKnex().raw("role::text AS role"),
+      'designation', 'territory_name', 'area_name', 'zone_name',
+      'zone_code', 'area_code', 'territory_code'
+    )
+    .orderBy('full_name');
+
+  if (reports.length > 0) return reports;
+
+  // Fallback: find all active users in the same area (except the ABM themselves)
+  const abmUser = await db('ts_auth_users')
+    .where({ employee_code: abmEmployeeCode, is_active: true })
+    .first('area_code');
+
+  if (abmUser?.area_code) {
+    // Fallback: only return roles that directly report to ABM (TBMs + specialists).
+    // Do NOT return SRs — they report to TBMs, not the ABM.
+    const abmDirectRoles = await db('ts_user_roles')
+      .where({ reporting_to: 'abm', is_active: true })
+      .pluck('role_name');
+
+    return db('ts_auth_users')
+      .where({ area_code: abmUser.area_code, is_active: true })
+      .whereNot({ employee_code: abmEmployeeCode })
+      .whereIn('designation', abmDirectRoles)
+      .select(
+        'employee_code', 'full_name',
+        getKnex().raw("role::text AS role"),
+        'designation', 'territory_name', 'area_name', 'zone_name',
+        'zone_code', 'area_code', 'territory_code'
+      )
+      .orderBy('full_name');
+  }
+
+  return [];
+}
+
+/* ─── shared month-name normalizer ─── */
+const MONTH_NAME_MAP = {
+  april:'apr', may:'may', june:'jun', july:'jul',
+  august:'aug', september:'sep', october:'oct', november:'nov',
+  december:'dec', january:'jan', february:'feb', march:'mar',
+};
+const MONTHS = ['apr','may','jun','jul','aug','sep','oct','nov','dec','jan','feb','mar'];
+
+const normalizeCat = (cat) => {
+  if (!cat) return 'others';
+  const c = cat.toLowerCase();
+  if (c.includes('equipment')) return 'equipment';
+  if (c.includes('iol'))       return 'iol';
+  if (c.includes('consumable')) return 'consumable-sales';
+  if (c.includes('msi') || c.includes('surgical')) return 'msi';
+  return c.replace(/[\s-]+/g, '-');
+};
+
+/* ──────────────────────────────────────────────────────────────────────────── */
+
 const ABMService = {
   // GET /abm/tbm-submissions
   async getTbmSubmissions(abmEmployeeCode, filters = {}) {
-    const directReports = await getKnex().raw(`SELECT employee_code FROM aop.ts_fn_get_direct_reports(?::varchar)`, [abmEmployeeCode]);
-    const tbmCodes = directReports.rows.map((r) => r.employee_code);
+    const directReports = await getAbmDirectReports(abmEmployeeCode);
+    const tbmCodes = directReports.map((r) => r.employee_code);
     if (tbmCodes.length === 0) return [];
     const activeFy = filters.fy || await getActiveFY();
     let query = db('ts_product_commitments AS pc')
@@ -67,8 +141,8 @@ const ABMService = {
 
   // POST /abm/bulk-approve-tbm
   async bulkApproveTbm(submissionIds, abmUser, comments = '') {
-    const directReports = await getKnex().raw(`SELECT employee_code FROM aop.ts_fn_get_direct_reports(?::varchar)`, [abmUser.employeeCode]);
-    const tbmCodes = directReports.rows.map((r) => r.employee_code);
+    const directReports = await getAbmDirectReports(abmUser.employeeCode);
+    const tbmCodes = directReports.map((r) => r.employee_code);
     const commitments = await db('ts_product_commitments').whereIn('id', submissionIds).where('status', 'submitted').whereIn('employee_code', tbmCodes);
     if (commitments.length === 0) throw Object.assign(new Error('No eligible submissions.'), { status: 400 });
     const ids = commitments.map((c) => c.id); const now = new Date();
@@ -78,9 +152,94 @@ const ABMService = {
   },
 
   // GET /abm/area-targets
+  // Mirrors TBM getTerritoryTargets: loads ALL active products from product_master,
+  // merges existing CY commitments for this ABM, then overlays LY from ts_geography_targets.
   async getAreaTargets(abmUser, fiscalYear) {
     const fy = fiscalYear || await getActiveFY();
-    return GeographyService.getGeographyTargets('area', abmUser.areaCode || abmUser.area_code, fy);
+    const areaCode = abmUser.areaCode || abmUser.area_code;
+    const abmCode  = abmUser.employeeCode;
+
+    // 1. Load ALL active products
+    const allProducts = await db('product_master')
+      .where('isactive', true)
+      .select(
+        'productcode',
+        'product_subgroup AS display_name',
+        'product_category',
+        'product_family AS subcategory',
+        'product_group AS subgroup',
+        'quota_price__c AS unit_cost'
+      )
+      .orderBy('product_family').orderBy('product_group').orderBy('product_subgroup');
+
+    // Build zero-initialized product map
+    const productMap = {};
+    allProducts.forEach((p) => {
+      const code = p.productcode;
+      productMap[code] = {
+        id: code, productCode: code, code,
+        name: p.display_name || code,
+        categoryId: normalizeCat(p.product_category),
+        subcategory: p.subcategory || null,
+        subgroup: p.subgroup || null,
+        unitCost: Number(p.unit_cost) || 0,
+        status: 'not_started',
+        monthlyTargets: {},
+      };
+      MONTHS.forEach((m) => {
+        productMap[code].monthlyTargets[m] = { cyQty: 0, cyRev: 0, lyQty: 0, lyRev: 0 };
+      });
+    });
+
+    // 2. Merge existing CY commitments for this ABM
+    const cyRows = await db('ts_product_commitments')
+      .where('employee_code', abmCode)
+      .where('fiscal_year_code', fy)
+      .select('id', 'product_code', 'fiscal_month', 'status',
+              'target_quantity', 'target_revenue', 'monthly_targets');
+
+    cyRows.forEach((r) => {
+      const code = r.product_code;
+      if (!productMap[code]) return;
+      const monthKey = MONTH_NAME_MAP[r.fiscal_month && r.fiscal_month.toLowerCase()];
+      if (!monthKey) return;
+      productMap[code].status = r.status || 'draft';
+      productMap[code].id = r.id;
+      const mt = r.monthly_targets || {};
+      productMap[code].monthlyTargets[monthKey].cyQty = Number(mt[monthKey] && mt[monthKey].cyQty != null ? mt[monthKey].cyQty : r.target_quantity || 0);
+      productMap[code].monthlyTargets[monthKey].cyRev = Number(mt[monthKey] && mt[monthKey].cyRev != null ? mt[monthKey].cyRev : r.target_revenue || 0);
+      if (mt[monthKey] && mt[monthKey].lyQty !== undefined) {
+        productMap[code].monthlyTargets[monthKey].lyQty = Number(mt[monthKey].lyQty) || 0;
+        productMap[code].monthlyTargets[monthKey].lyRev = Number(mt[monthKey].lyRev) || 0;
+      }
+    });
+
+    // 3. Overlay LY from ts_geography_targets (area level, prev FY)
+    if (areaCode) {
+      const prevFyCode = fy === 'FY26_27' ? 'FY25_26' : null;
+      const lyFyCode = prevFyCode || fy;
+      const lyRows = await db('ts_geography_targets')
+        .where('geo_level', 'area')
+        .where('fiscal_year_code', lyFyCode)
+        .where('area_code', String(areaCode))
+        .where(function () { this.where('target_quantity', '>', 0).orWhere('target_revenue', '>', 0); })
+        .select('product_code', 'fiscal_month', 'target_quantity', 'target_revenue');
+
+      lyRows.forEach((r) => {
+        const code = r.product_code;
+        if (!productMap[code]) return;
+        const monthKey = MONTH_NAME_MAP[r.fiscal_month && r.fiscal_month.toLowerCase()];
+        if (!monthKey) return;
+        if (productMap[code].monthlyTargets[monthKey].lyQty === 0) {
+          productMap[code].monthlyTargets[monthKey].lyQty = Number(r.target_quantity) || 0;
+          productMap[code].monthlyTargets[monthKey].lyRev = Number(r.target_revenue) || 0;
+        }
+      });
+    }
+
+    return Object.values(productMap).sort((a, b) =>
+      a.categoryId.localeCompare(b.categoryId) || a.name.localeCompare(b.name)
+    );
   },
 
   // PUT /abm/area-targets/:id/save
@@ -118,19 +277,19 @@ const ABMService = {
 
   // GET /abm/team-members
   async getTeamMembers(abmEmployeeCode) {
-    const directReports = await getKnex().raw(`SELECT employee_code, full_name, designation, territory_name, role FROM aop.ts_fn_get_direct_reports(?::varchar)`, [abmEmployeeCode]);
-    return directReports.rows.map((r) => ({ employeeCode: r.employee_code, fullName: r.full_name, designation: r.designation, territory: r.territory_name, role: r.role }));
+    const directReports = await getAbmDirectReports(abmEmployeeCode);
+    return directReports.map((r) => ({ employeeCode: r.employee_code, fullName: r.full_name, designation: r.designation, territory: r.territory_name, role: r.role }));
   },
 
   // GET /abm/tbm-hierarchy
   async getTbmHierarchy(abmEmployeeCode) {
-    const directReports = await getKnex().raw(`SELECT employee_code, full_name, designation, territory_name, role FROM aop.ts_fn_get_direct_reports(?::varchar)`, [abmEmployeeCode]);
+    const directReports = await getAbmDirectReports(abmEmployeeCode);
     const activeFy = await getActiveFY(); const result = [];
-    for (const tbm of directReports.rows) {
-      const srReports = await getKnex().raw(`SELECT employee_code FROM aop.ts_fn_get_direct_reports(?::varchar)`, [tbm.employee_code]);
+    for (const tbm of directReports) {
+      const srReports = await db('ts_auth_users').where({ reports_to: tbm.employee_code, is_active: true }).select('employee_code');
       const commitments = await db('ts_product_commitments').where({ employee_code: tbm.employee_code, fiscal_year_code: activeFy });
       result.push({ employeeCode: tbm.employee_code, fullName: tbm.full_name, designation: tbm.designation, territory: tbm.territory_name, role: tbm.role,
-        salesRepCount: srReports.rows.length, totalCommitments: commitments.length,
+        salesRepCount: srReports.length, totalCommitments: commitments.length,
         submitted: commitments.filter((c) => c.status === 'submitted').length,
         approved: commitments.filter((c) => c.status === 'approved').length });
     }
@@ -140,11 +299,11 @@ const ABMService = {
   // GET /abm/team-yearly-targets
   async getTeamYearlyTargets(abmEmployeeCode, fiscalYear) {
     const fy = fiscalYear || await getActiveFY();
-    const directReports = await getKnex().raw(`SELECT employee_code, full_name FROM aop.ts_fn_get_direct_reports(?::varchar)`, [abmEmployeeCode]);
+    const directReports = await getAbmDirectReports(abmEmployeeCode);
     const assignments = await db('ts_yearly_target_assignments AS yta').leftJoin('ts_auth_users AS u', 'u.employee_code', 'yta.assignee_code')
       .where('yta.assigner_code', abmEmployeeCode).where('yta.fiscal_year_code', fy)
       .select('yta.*', 'u.full_name AS assignee_name', 'u.territory_name');
-    const members = directReports.rows.map((r) => {
+    const members = directReports.map((r) => {
       const memberTargets = assignments.filter((a) => a.assignee_code === r.employee_code);
       return { employeeCode: r.employee_code, fullName: r.full_name,
         targets: memberTargets.map((a) => ({ id: a.id, productCode: a.product_code, categoryId: a.category_id, yearlyTarget: parseFloat(a.yearly_target || 0), status: a.status, territory: a.territory_name })) };
@@ -170,15 +329,15 @@ const ABMService = {
 
   // GET /abm/unique-tbms
   async getUniqueTbms(abmEmployeeCode) {
-    const directReports = await getKnex().raw(`SELECT employee_code, full_name, designation, territory_name FROM aop.ts_fn_get_direct_reports(?::varchar)`, [abmEmployeeCode]);
-    return directReports.rows.map((r) => ({ employeeCode: r.employee_code, fullName: r.full_name, designation: r.designation, territory: r.territory_name }));
+    const directReports = await getAbmDirectReports(abmEmployeeCode);
+    return directReports.map((r) => ({ employeeCode: r.employee_code, fullName: r.full_name, designation: r.designation, territory: r.territory_name }));
   },
 
   // GET /abm/dashboard-stats
   async getDashboardStats(abmEmployeeCode) {
     const activeFy = await getActiveFY();
-    const directReports = await getKnex().raw(`SELECT employee_code FROM aop.ts_fn_get_direct_reports(?::varchar)`, [abmEmployeeCode]);
-    const tbmCodes = directReports.rows.map((r) => r.employee_code);
+    const directReports = await getAbmDirectReports(abmEmployeeCode);
+    const tbmCodes = directReports.map((r) => r.employee_code);
     const allCodes = [...tbmCodes, abmEmployeeCode];
     const commitments = allCodes.length > 0 ? await db('ts_product_commitments').whereIn('employee_code', allCodes).where('fiscal_year_code', activeFy) : [];
     const totals = aggregateMonthlyTargets(commitments);

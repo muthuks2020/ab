@@ -240,18 +240,50 @@ const getSpecialists = async (abmEmployeeCode) => {
 const getSpecialistYearlyTargets = async (abmEmployeeCode, fiscalYearCode) => {
   const fy = fiscalYearCode || await getActiveFY();
 
-  const rows = await db('ts_yearly_target_assignments')
-    .where({ manager_code: abmEmployeeCode, fiscal_year_code: fy })
-    .whereIn('assignee_role', SPECIALIST_ROLES)
-    .orderBy('assignee_name');
+  // ts_yearly_target_assignments has no assignee_name/assignee_territory columns —
+  // JOIN ts_auth_users to get those fields.
+  const rows = await db('ts_yearly_target_assignments AS yta')
+    .leftJoin('ts_auth_users AS u', 'u.employee_code', 'yta.assignee_code')
+    .where({ 'yta.manager_code': abmEmployeeCode, 'yta.fiscal_year_code': fy })
+    .whereIn('yta.assignee_role', SPECIALIST_ROLES)
+    .select(
+      'yta.*',
+      'u.full_name AS assignee_name',
+      'u.area_name AS assignee_territory',
+    )
+    .orderBy('u.full_name');
+
+  // When no assignment rows exist yet, build skeleton rows from the specialists list
+  // so the UI always shows all specialists (not a blank page).
+  if (rows.length === 0) {
+    const specialists = await db('ts_auth_users')
+      .where({ reports_to: abmEmployeeCode, is_active: true })
+      .whereIn('role', SPECIALIST_ROLES)
+      .orderBy('full_name');
+
+    return specialists.map((s) => ({
+      id: null,
+      fiscalYearCode: fy,
+      assigneeCode: s.employee_code,
+      assigneeName: s.full_name,
+      assigneeRole: s.role,
+      assigneeTerritory: s.area_name || s.territory_name || '',
+      lyTargetQty: 0, lyAchievedQty: 0,
+      lyTargetValue: 0, lyAchievedValue: 0,
+      cyTargetQty: 0, cyTargetValue: 0,
+      categoryBreakdown: [],
+      status: 'not_set',
+      publishedAt: null,
+    }));
+  }
 
   return rows.map((r) => ({
     id: r.id,
     fiscalYearCode: r.fiscal_year_code,
     assigneeCode: r.assignee_code,
-    assigneeName: r.assignee_name,
+    assigneeName: r.assignee_name || r.assignee_code,
     assigneeRole: r.assignee_role,
-    assigneeTerritory: r.assignee_territory,
+    assigneeTerritory: r.assignee_territory || r.area_name || '',
     lyTargetQty: parseFloat(r.ly_target_qty || 0),
     lyAchievedQty: parseFloat(r.ly_achieved_qty || 0),
     lyTargetValue: parseFloat(r.ly_target_value || 0),
@@ -295,10 +327,13 @@ const saveSpecialistYearlyTargets = async (targets, abmUser, fiscalYearCode) => 
           fiscal_year_code: fy,
           manager_code: abmUser.employeeCode,
           manager_role: abmUser.role,
+          geo_level: 'area',
           assignee_code: t.assigneeCode,
-          assignee_name: t.assigneeName || specialist?.full_name || '',
           assignee_role: specialist?.role || 'at_iol_specialist',
-          assignee_territory: specialist?.area_name || specialist?.territory_name || '',
+          area_code: abmUser.areaCode || abmUser.area_code || null,
+          area_name: abmUser.areaName || abmUser.area_name || null,
+          zone_code: abmUser.zoneCode || abmUser.zone_code || null,
+          zone_name: abmUser.zoneName || abmUser.zone_name || null,
           ...data,
           created_at: now,
         });

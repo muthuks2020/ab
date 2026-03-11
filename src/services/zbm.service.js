@@ -45,38 +45,63 @@ async function getSubordinates(rootEmpCode) {
 }
 
 /**
- * Get ABM-level subordinates for a ZBM.
- * Primary path: use reports_to chain. Fallback: match by zone_code when chain is broken.
+ * Get ABM-level direct reports for a ZBM.
+ * Uses single-level query (reports_to) NOT recursive — ABMs are exactly
+ * one level below the ZBM. The old recursive CTE caused each ABM to appear
+ * multiple times (once per path through the full hierarchy tree).
+ * Fallback: zone_code match when reports_to chain is not configured.
  */
 async function getAbmSubordinates(zbmEmployeeCode) {
-  const subs = await getSubordinates(zbmEmployeeCode);
-  const abmRows = subs.filter(
-    (r) => r.employee_code !== zbmEmployeeCode && r.role === 'Area Business Manager'
-  );
+  // Direct reports only — 1 level, no recursion
+  const abmRows = await db('ts_auth_users')
+    .where({ reports_to: zbmEmployeeCode, is_active: true })
+    .whereRaw("role::text = 'Area Business Manager'")
+    .select(
+      'employee_code', 'full_name',
+      getKnex().raw("role::text AS role"),
+      'designation', 'zone_name', 'area_name', 'territory_name',
+      'zone_code', 'area_code'
+    )
+    .orderBy('full_name');
 
-  // Fallback: if reporting chain is not configured, find ABMs by zone_code
-  if (abmRows.length === 0) {
-    const zbmUser = await db('ts_auth_users')
-      .where({ employee_code: zbmEmployeeCode, is_active: true })
-      .first('zone_code');
-    if (zbmUser?.zone_code) {
-      return db('ts_auth_users')
-        .where({ zone_code: zbmUser.zone_code, is_active: true })
-        .whereRaw("role::text = 'Area Business Manager'")
-        .select('employee_code', 'full_name', getKnex().raw("role::text AS role"),
-                'zone_name', 'area_name', 'territory_name', 'zone_code', 'area_code');
-    }
+  if (abmRows.length > 0) return abmRows;
+
+  // Fallback: reports_to chain not configured — find ABMs by zone_code
+  const zbmUser = await db('ts_auth_users')
+    .where({ employee_code: zbmEmployeeCode, is_active: true })
+    .first('zone_code');
+  if (zbmUser?.zone_code) {
+    return db('ts_auth_users')
+      .where({ zone_code: zbmUser.zone_code, is_active: true })
+      .whereRaw("role::text = 'Area Business Manager'")
+      .whereNot({ employee_code: zbmEmployeeCode })
+      .select(
+        'employee_code', 'full_name',
+        getKnex().raw("role::text AS role"),
+        'designation', 'zone_name', 'area_name', 'territory_name',
+        'zone_code', 'area_code'
+      )
+      .orderBy('full_name');
   }
-  return abmRows;
+  return [];
 }
 
 /**
  * Get ALL subordinates under a ZBM's ABMs (TBMs + Sales Reps).
- * Same fallback: zone_code when reports_to chain is broken.
+ * Deduplicates by employee_code — the recursive CTE can return the same
+ * person via multiple paths if the reports_to graph has any cross-links.
+ * Fallback: zone_code when reports_to chain is broken.
  */
 async function getAllSubordinatesUnderZbm(zbmEmployeeCode) {
   const subs = await getSubordinates(zbmEmployeeCode);
-  const allBelow = subs.filter((r) => r.employee_code !== zbmEmployeeCode);
+  // Deduplicate — keep first occurrence of each employee_code
+  const seen = new Set();
+  const allBelow = subs.filter((r) => {
+    if (r.employee_code === zbmEmployeeCode) return false;
+    if (seen.has(r.employee_code)) return false;
+    seen.add(r.employee_code);
+    return true;
+  });
 
   // Fallback via zone_code
   if (allBelow.length === 0) {

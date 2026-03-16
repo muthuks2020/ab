@@ -1,6 +1,3 @@
-/**
- * salesrep.controller.js — NO CHANGES from v4 (thin controller)
- */
 const CommitmentService = require('../services/commitment.service');
 const { successResponse, errorResponse } = require('../utils/helpers');
 

@@ -1,15 +1,6 @@
-/**
- * tbm.service.js — TBM Service (Territory Business Manager)
- * @version 2.0.0 - Migrated to aop schema (v5). JOINs to product_master.
- */
-
 const { db, getKnex } = require('../config/database');
 const { formatCommitment, aggregateMonthlyTargets, calcGrowth } = require('../utils/helpers');
 
-/**
- * Normalize fiscal year code to DB format (FY26_27).
- * Handles frontend format '2026-27' → 'FY26_27'
- */
 function normalizeFY(fyCode) {
   if (!fyCode) return fyCode;
   if (/^FY\d{2}_\d{2}$/.test(fyCode)) return fyCode;
@@ -20,9 +11,6 @@ function normalizeFY(fyCode) {
 
 const TBMService = {
 
-  /**
-   * GET /tbm/sales-rep-submissions — with product_master JOIN
-   */
   async getSalesRepSubmissions(tbmEmployeeCode, filters = {}) {
     const directReports = await getKnex().raw(
       `SELECT employee_code FROM aop.ts_fn_get_direct_reports(?::varchar)`,
@@ -74,9 +62,6 @@ const TBMService = {
     }));
   },
 
-  /**
-   * PUT /tbm/approve-sales-rep/:id
-   */
   async approveSalesRepTarget(commitmentId, tbmUser, { comments = '', corrections = null } = {}) {
     const commitment = await db('ts_product_commitments').where({ id: commitmentId }).first();
     if (!commitment) throw Object.assign(new Error('Commitment not found.'), { status: 404 });
@@ -110,14 +95,14 @@ const TBMService = {
       status: 'approved',
       approved_at: new Date(),
       approved_by_code: tbmUser.employeeCode,
-      
+
     });
 
     await db('ts_commitment_approvals').insert({
       commitment_id: commitmentId,
       action,
       actor_code: tbmUser.employeeCode,
-      
+
       actor_role: tbmUser.role,
       corrections: corrections ? JSON.stringify(corrections) : null,
       original_values: originalValues ? JSON.stringify(originalValues) : null,
@@ -127,9 +112,6 @@ const TBMService = {
     return { success: true, submissionId: commitmentId, action };
   },
 
-  /**
-   * POST /tbm/bulk-approve-sales-rep
-   */
   async bulkApproveSalesRep(submissionIds, tbmUser, comments = '') {
     const directReports = await getKnex().raw(
       `SELECT employee_code FROM aop.ts_fn_get_direct_reports(?::varchar)`,
@@ -154,14 +136,14 @@ const TBMService = {
         status: 'approved',
         approved_at: new Date(),
         approved_by_code: tbmUser.employeeCode,
-        
+
       });
 
     const approvalRows = validIds.map((id) => ({
       commitment_id: id,
       action: 'bulk_approved',
       actor_code: tbmUser.employeeCode,
-      
+
       actor_role: tbmUser.role,
       comments,
     }));
@@ -174,9 +156,6 @@ const TBMService = {
     };
   },
 
-  /**
-   * POST /tbm/reject-sales-rep/:id
-   */
   async rejectSalesRepTarget(commitmentId, tbmUser, reason = '') {
     const commitment = await db('ts_product_commitments').where({ id: commitmentId }).first();
     if (!commitment) throw Object.assign(new Error('Commitment not found.'), { status: 404 });
@@ -193,16 +172,13 @@ const TBMService = {
       commitment_id: commitmentId,
       action: 'submitted',
       actor_code: tbmUser.employeeCode,
-      
+
       actor_role: tbmUser.role,
       comments: `REJECTED: ${reason}`,
     });
     return { success: true, submissionId: commitmentId, reason };
   },
 
-  /**
-   * POST /tbm/bulk-reject-sales-rep
-   */
   async bulkRejectSalesRep(submissionIds, tbmUser, reason = '') {
     const directReports = await getKnex().raw(`SELECT employee_code FROM aop.ts_fn_get_direct_reports(?::varchar)`, [tbmUser.employeeCode]);
     const srCodes = directReports.rows.map((r) => r.employee_code);
@@ -220,16 +196,6 @@ const TBMService = {
     return { success: true, rejectedCount: validIds.length, message: `${validIds.length} targets rejected` };
   },
 
-  /**
-   * GET /tbm/territory-targets
-   *
-   * Works like Sales Rep: loads ALL active products from product_master,
-   * merges in any existing CY commitments, and pulls LY data from
-   * ts_geography_targets for this TBM's territory.
-   *
-   * This way the grid always shows all products regardless of whether
-   * the TBM has entered any commitments yet.
-   */
   async getTerritoryTargets(tbmEmployeeCode, filters = {}) {
     const MONTH_NAME_MAP = {
       april:'apr', may:'may', june:'jun', july:'jul',
@@ -238,7 +204,6 @@ const TBMService = {
     };
     const MONTHS = ['apr','may','jun','jul','aug','sep','oct','nov','dec','jan','feb','mar'];
 
-    // Map product_master.product_category → ts_product_categories.id
     const normalizeCat = (cat) => {
       if (!cat) return 'others';
       const c = cat.toLowerCase();
@@ -249,17 +214,14 @@ const TBMService = {
       return c.replace(/[\s-]+/g, '-');
     };
 
-    // ── 1. Get the TBM user record (need territory_code for LY lookup) ──
     const tbmUser = await db('ts_auth_users')
       .where('employee_code', tbmEmployeeCode)
       .first();
     const territoryCode = tbmUser?.territory_code;
 
-    // ── 2. Get active fiscal year ──
     const activeFy = await db('ts_fiscal_years').where('is_active', true).first();
     const activeFyCode = activeFy?.code;
 
-    // ── 3. Load ALL active products from product_master ──
     let productQuery = db('product_master').where('isactive', true);
     if (filters.categoryId) {
       const catMap = {
@@ -273,22 +235,21 @@ const TBMService = {
     const allProducts = await productQuery
       .select(
         'productcode',
-        'product_subgroup AS display_name',  // human-readable name (product_name is SF ID)
+        'product_subgroup AS display_name',
         'product_category',
-        'product_family AS subcategory',      // e.g. "Diagnostic", "Surgical", "Monofocal"
-        'product_group AS subgroup',          // e.g. sub-grouping within subcategory
+        'product_family AS subcategory',
+        'product_group AS subgroup',
         'quota_price__c AS unit_cost'
       )
       .orderBy('product_family')
       .orderBy('product_group')
       .orderBy('product_subgroup');
 
-    // Build base product map — all products start with zero targets
     const productMap = {};
     allProducts.forEach((p) => {
       const code = p.productcode;
       productMap[code] = {
-        id: code,              // use product code as id until we find a commitment id
+        id: code,
         productCode: code,
         code: code,
         name: p.display_name || code,
@@ -304,8 +265,6 @@ const TBMService = {
       });
     });
 
-    // ── 4. Load existing CY commitments (active FY) for this TBM ──
-    // DB stores one row per product per fiscal_month
     if (activeFyCode) {
       let cyQuery = db('ts_product_commitments')
         .where('employee_code', tbmEmployeeCode)
@@ -319,22 +278,19 @@ const TBMService = {
 
       cyRows.forEach((r) => {
         const code = r.product_code;
-        if (!productMap[code]) return; // skip products not in product_master
+        if (!productMap[code]) return;
         const monthKey = MONTH_NAME_MAP[r.fiscal_month?.toLowerCase()];
         if (!monthKey) return;
 
-        // Update status to most recent commitment status
         productMap[code].status = r.status || 'draft';
-        productMap[code].id = r.id; // real DB id for save/submit
+        productMap[code].id = r.id;
 
-        // CY: prefer monthly_targets JSON (user-edited), fallback to target_quantity column
         const mt = r.monthly_targets || {};
         const cyQty = Number(mt[monthKey]?.cyQty ?? r.target_quantity ?? 0);
         const cyRev = Number(mt[monthKey]?.cyRev ?? r.target_revenue ?? 0);
         productMap[code].monthlyTargets[monthKey].cyQty = cyQty;
         productMap[code].monthlyTargets[monthKey].cyRev = cyRev;
 
-        // LY from monthly_targets JSON if migration has been run
         if (mt[monthKey]?.lyQty !== undefined) {
           productMap[code].monthlyTargets[monthKey].lyQty = Number(mt[monthKey].lyQty) || 0;
           productMap[code].monthlyTargets[monthKey].lyRev = Number(mt[monthKey].lyRev) || 0;
@@ -342,11 +298,9 @@ const TBMService = {
       });
     }
 
-    // ── 5. Load LY data from ts_geography_targets (territory level, prev FY) ──
-    // Only fill lyQty/lyRev where not already set from monthly_targets JSON
     if (territoryCode) {
       const prevFyCode = activeFyCode === 'FY26_27' ? 'FY25_26' : null;
-      const lyFyCode = prevFyCode || activeFyCode; // fallback: use same FY if only one exists
+      const lyFyCode = prevFyCode || activeFyCode;
 
       const lyRows = await db('ts_geography_targets')
         .where('geo_level', 'territory')
@@ -362,7 +316,7 @@ const TBMService = {
         if (!productMap[code]) return;
         const monthKey = MONTH_NAME_MAP[r.fiscal_month?.toLowerCase()];
         if (!monthKey) return;
-        // Only overwrite if not already set from monthly_targets JSON
+
         if (productMap[code].monthlyTargets[monthKey].lyQty === 0) {
           productMap[code].monthlyTargets[monthKey].lyQty = Number(r.target_quantity) || 0;
           productMap[code].monthlyTargets[monthKey].lyRev = Number(r.target_revenue) || 0;
@@ -375,9 +329,6 @@ const TBMService = {
     );
   },
 
-  /**
-   * PUT /tbm/territory-targets/save
-   */
   async saveTerritoryTargets(targets, tbmUser) {
     let savedCount = 0;
     for (const t of targets) {
@@ -397,9 +348,6 @@ const TBMService = {
     return { success: true, savedCount, message: 'Targets saved as draft' };
   },
 
-  /**
-   * POST /tbm/territory-targets/submit
-   */
   async submitTerritoryTargets(targetIds, tbmUser) {
     const commitments = await db('ts_product_commitments')
       .whereIn('id', targetIds)
@@ -419,7 +367,7 @@ const TBMService = {
       commitment_id: id,
       action: 'submitted',
       actor_code: tbmUser.employeeCode,
-      
+
       actor_role: tbmUser.role,
     }));
     await db('ts_commitment_approvals').insert(approvalRows);
@@ -431,9 +379,6 @@ const TBMService = {
     };
   },
 
-  /**
-   * PATCH /tbm/territory-targets/:id
-   */
   async updateSingleTarget(targetId, tbmUser, { month, values }) {
     const commitment = await db('ts_product_commitments')
       .where({ id: targetId, employee_code: tbmUser.employeeCode }).first();
@@ -449,7 +394,6 @@ const TBMService = {
     return { success: true, targetId, month };
   },
 
-  // Individual targets reuse territory targets logic
   async getIndividualTargets(tbmEmployeeCode, filters = {}) {
     return this.getTerritoryTargets(tbmEmployeeCode, filters);
   },
@@ -460,9 +404,6 @@ const TBMService = {
     return this.submitTerritoryTargets(targetIds, tbmUser);
   },
 
-  /**
-   * GET /tbm/dashboard-stats
-   */
   async getDashboardStats(tbmEmployeeCode) {
     const activeFy = await db('ts_fiscal_years').where('is_active', true).first();
     if (!activeFy) return {};
@@ -510,22 +451,18 @@ const TBMService = {
     };
   },
 
-  /**
-   * GET /tbm/yearly-targets
-   */
   async getYearlyTargets(tbmEmployeeCode, fiscalYearCode) {
     const rawFy = fiscalYearCode || (await db('ts_fiscal_years').where('is_active', true).first())?.code;
     const fy = normalizeFY(rawFy);
     if (!fy) return { members: [] };
 
-    // Compute previous FY code — handles both "FY26_27" and "2026-27" formats
     const computePrevFy = (fyCode) => {
-      // Format: FY26_27
+
       const m1 = fyCode.match(/FY(\d{2})_(\d{2})/);
       if (m1) {
         return `FY${String(parseInt(m1[1]) - 1).padStart(2,'0')}_${String(parseInt(m1[2]) - 1).padStart(2,'0')}`;
       }
-      // Format: 2026-27
+
       const m2 = fyCode.match(/(\d{4})-(\d{2})/);
       if (m2) {
         const y1 = parseInt(m2[1]) - 1;
@@ -551,8 +488,6 @@ const TBMService = {
         })
         .first();
 
-      // LY TARGET = sum of target_revenue/target_quantity from FY25_26 commitments (flat columns)
-      // FY25_26 records store data in flat columns, not JSONB monthly_targets
       let lyTargetValue   = assignment ? parseFloat(assignment.ly_target_value)  : 0;
       let lyAchievedValue = assignment ? parseFloat(assignment.ly_achieved_value) : 0;
       let lyTarget        = assignment ? parseFloat(assignment.ly_target_qty)     : 0;
@@ -560,7 +495,6 @@ const TBMService = {
 
       const prevFy = prevFyForLY;
 
-      // Fetch LY target only if not already in FY26_27 assignment row
       if (!lyTargetValue && prevFy) {
         const lyResult = await db('ts_product_commitments')
           .where({ employee_code: sr.employee_code, fiscal_year_code: prevFy })
@@ -571,8 +505,6 @@ const TBMService = {
         lyTarget      = parseFloat(lyResult?.totalQty)  || 0;
       }
 
-      // Fetch LY achieved independently — runs even when lyTargetValue is already set
-      // This fixes the bug where ly_target_value was backfilled but ly_achieved_value was not
       if (!lyAchievedValue && prevFy) {
         const lyAssignment = await db('ts_yearly_target_assignments')
           .where({ fiscal_year_code: prevFy, assignee_code: sr.employee_code })
@@ -583,7 +515,6 @@ const TBMService = {
         lyAchieved      = parseFloat(lyAssignment?.totalAchQty)  || 0;
       }
 
-      // Backfill FY26_27 assignment row so future reads are instant
       if (assignment && (lyTargetValue > 0 || lyAchievedValue > 0)) {
         await db('ts_yearly_target_assignments')
           .where({ id: assignment.id })
@@ -596,12 +527,10 @@ const TBMService = {
           });
       }
 
-      // Build category-level LY breakdown from FY25_26 flat columns
       let categoryBreakdown = assignment?.category_breakdown || [];
       if (!Array.isArray(categoryBreakdown) || categoryBreakdown.length === 0) {
         const prevFy = prevFyForLY;
 
-        // LY target per category: sum flat columns from ts_product_commitments FY25_26
         const lyRows = prevFy
           ? await db('ts_product_commitments')
               .where({ employee_code: sr.employee_code, fiscal_year_code: prevFy })
@@ -610,7 +539,6 @@ const TBMService = {
               .sum({ lyRev: 'target_revenue', lyQty: 'target_quantity' })
           : [];
 
-        // LY achieved per category: from ts_yearly_target_assignments FY25_26
         const lyAchRows = prevFy
           ? await db('ts_yearly_target_assignments')
               .where({ fiscal_year_code: prevFy, assignee_code: sr.employee_code })
@@ -619,7 +547,6 @@ const TBMService = {
               .sum({ lyAchRev: 'ly_achieved_value', lyAchQty: 'ly_achieved_qty' })
           : [];
 
-        // CY per category: sum cyRev/cyQty from JSONB for current FY
         const currCommitments = await db('ts_product_commitments')
           .where({ employee_code: sr.employee_code, fiscal_year_code: fy })
           .select('category_id', 'monthly_targets');
@@ -635,7 +562,6 @@ const TBMService = {
           }
         }
 
-        // Build a map of category_name → achieved for easy lookup
         const lyAchMap = {};
         lyAchRows.forEach(r => {
           if (r.category_name) {
@@ -681,9 +607,6 @@ const TBMService = {
     return { members };
   },
 
-  /**
-   * POST /tbm/yearly-targets/save
-   */
   async saveYearlyTargets(tbmUser, fiscalYear, membersData) {
     const fy = normalizeFY(fiscalYear);
     let savedCount = 0;
@@ -708,10 +631,10 @@ const TBMService = {
       if (existing) {
         await db('ts_yearly_target_assignments').where({ id: existing.id }).update(data);
       } else {
-        // Look up assignee to get real role and territory (uses existing DB columns)
+
         const assignee = await db('ts_auth_users').where({ employee_code: m.id }).first();
         await db('ts_yearly_target_assignments').insert({
-          fiscal_year_code: fy,           // ✅ use normalized code (e.g. 'FY26_27'), not raw frontend value ('2026-27')
+          fiscal_year_code: fy,
           manager_code: tbmUser.employeeCode,
           manager_role: tbmUser.role,
           geo_level: 'territory',
@@ -727,9 +650,6 @@ const TBMService = {
     return { success: true, savedCount };
   },
 
-  /**
-   * POST /tbm/yearly-targets/publish
-   */
   async publishYearlyTargets(tbmUser, fiscalYear, memberIds) {
     const fy = normalizeFY(fiscalYear);
     let publishedCount = 0;
@@ -749,9 +669,6 @@ const TBMService = {
     return { success: true, publishedCount };
   },
 
-  /**
-   * GET /tbm/team-targets/summary
-   */
   async getTeamTargetsSummary(tbmEmployeeCode) {
     const activeFy = await db('ts_fiscal_years').where('is_active', true).first();
     if (!activeFy) return [];
@@ -774,9 +691,6 @@ const TBMService = {
     return summary;
   },
 
-  /**
-   * GET /tbm/team-targets/:repId
-   */
   async getTeamTargetsForRep(tbmUser, repId) {
     const activeFy = await db('ts_fiscal_years').where('is_active', true).first();
     if (!activeFy) return [];
@@ -785,9 +699,6 @@ const TBMService = {
     return rows;
   },
 
-  /**
-   * POST /tbm/team-targets/:repId/save
-   */
   async saveTeamTargetsForRep(tbmUser, repId, targets) {
     const activeFy = await db('ts_fiscal_years').where('is_active', true).first();
     if (!activeFy) throw Object.assign(new Error('No active fiscal year.'), { status: 400 });
@@ -815,9 +726,6 @@ const TBMService = {
     return { success: true, repId, savedCount };
   },
 
-  /**
-   * POST /tbm/team-targets/:repId/assign
-   */
   async assignTeamTargetsToRep(tbmUser, repId, targets) {
     const result = await this.saveTeamTargetsForRep(tbmUser, repId, targets);
     const activeFy = await db('ts_fiscal_years').where('is_active', true).first();
@@ -828,19 +736,17 @@ const TBMService = {
     }
     return { success: true, repId, assignedCount: result.savedCount };
   },
-  // GET /tbm/team-members — direct report sales reps
+
   async getTeamMembers(tbmEmployeeCode) {
     const directReports = await getKnex().raw(`SELECT employee_code, full_name, designation, territory_name, role FROM aop.ts_fn_get_direct_reports(?::varchar)`, [tbmEmployeeCode]);
     return directReports.rows.map((r) => ({ employeeCode: r.employee_code, fullName: r.full_name, designation: r.designation, territory: r.territory_name, role: r.role }));
   },
 
-  // GET /tbm/unique-reps — distinct SRs under this TBM
   async getUniqueReps(tbmEmployeeCode) {
     const directReports = await getKnex().raw(`SELECT employee_code, full_name, designation, territory_name FROM aop.ts_fn_get_direct_reports(?::varchar)`, [tbmEmployeeCode]);
     return directReports.rows.map((r) => ({ employeeCode: r.employee_code, fullName: r.full_name, designation: r.designation, territory: r.territory_name }));
   },
 
-  // PUT /tbm/territory-targets/:id/save — save single territory target by ID
   async saveSingleTerritoryTarget(targetId, monthlyTargets, tbmUser) {
     const target = await db('ts_geography_targets').where({ id: targetId }).first();
     if (!target) throw Object.assign(new Error('Target not found.'), { status: 404 });
@@ -848,7 +754,6 @@ const TBMService = {
     return { success: true, targetId };
   },
 
-  // POST /tbm/individual-targets/:id/save — save single individual target by ID
   async saveSingleIndividualTarget(targetId, monthlyTargets, tbmUser) {
     const target = await db('ts_team_product_targets').where({ id: targetId }).first();
     if (!target) throw Object.assign(new Error('Target not found.'), { status: 404 });

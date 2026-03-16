@@ -1,22 +1,7 @@
-/**
- * sso.service.js — Azure AD SSO Backend Service
- *
- * 4-step lookup: azure_oid → employee_code → email → auto-provision
- * Token validation uses JWKS public keys (no client secret needed).
- * Employee code comes from Azure AD phone_number claim (domain convention).
- *
- * ★ SAFE REQUIRE: If jwks-rsa is not installed, the server still starts.
- *   validateAzureToken will throw a clear error at runtime instead of
- *   crashing the entire backend at startup.
- *
- * @version 3.1.0
- */
-
 const jwt = require('jsonwebtoken');
 const azureConfig = require('../config/azure-ad');
 const db = require('../config/database');
 
-// ★ Safe require — don't crash the server if jwks-rsa isn't installed
 let jwksClient;
 try {
   jwksClient = require('jwks-rsa');
@@ -39,7 +24,7 @@ function getJwksClient() {
       jwksUri: azureConfig.JWKS_URI,
       cache: true,
       cacheMaxEntries: 5,
-      cacheMaxAge: 600000, // 10 minutes
+      cacheMaxAge: 600000,
     });
   }
   return jwksClientInstance;
@@ -54,11 +39,6 @@ function getSigningKey(header) {
   });
 }
 
-/**
- * Validate Azure AD ID token using JWKS public keys.
- * @param {string} idToken — Raw JWT from MSAL popup
- * @returns {object} Decoded claims
- */
 async function validateAzureToken(idToken) {
   if (!idToken) throw new Error('No token provided');
 
@@ -76,17 +56,9 @@ async function validateAzureToken(idToken) {
   return claims;
 }
 
-/**
- * 4-step user lookup/create:
- *   Step 1: azure_oid → returning SSO user
- *   Step 2: employee_code (from phone_number claim) → link existing user
- *   Step 3: email → link existing user
- *   Step 4: auto-provision new user
- */
 async function findOrCreateSsoUser({ azure_oid, email, name, employee_code, groups }) {
   const knex = db.getKnex();
 
-  // ── Step 1: Look up by azure_oid (returning user) ──────────────────
   let user = await knex('ts_auth_users').where('azure_oid', azure_oid).first();
 
   if (user) {
@@ -98,7 +70,6 @@ async function findOrCreateSsoUser({ azure_oid, email, name, employee_code, grou
     return await knex('ts_auth_users').where('id', user.id).first();
   }
 
-  // ── Step 2: Look up by employee_code (Azure AD phone_number) ───────
   if (employee_code && employee_code.trim()) {
     user = await knex('ts_auth_users')
       .where('employee_code', employee_code.trim())
@@ -131,7 +102,6 @@ async function findOrCreateSsoUser({ azure_oid, email, name, employee_code, grou
     }
   }
 
-  // ── Step 3: Look up by email — link azure_oid ──────────────────────
   if (email) {
     user = await knex('ts_auth_users').where('email', email).first();
 
@@ -161,11 +131,9 @@ async function findOrCreateSsoUser({ azure_oid, email, name, employee_code, grou
     }
   }
 
-  // ── Step 4: Auto-provision new user ────────────────────────────────
   console.log(`[SSO] Auto-provisioning new user: ${email}`);
   const role = determineRole(groups, email);
 
-  // Use employee_code from Azure AD if available, otherwise generate one
   const finalEmployeeCode = (employee_code && employee_code.trim())
     ? employee_code.trim()
     : await generateEmployeeCode(knex, role);
@@ -199,9 +167,6 @@ async function findOrCreateSsoUser({ azure_oid, email, name, employee_code, grou
   return newUser;
 }
 
-/**
- * Determine role from Azure AD groups or admin email list.
- */
 function determineRole(groups, email) {
   const adminEmails = (process.env.DEFAULT_ADMIN_EMAILS || '')
     .split(',')
@@ -218,9 +183,6 @@ function determineRole(groups, email) {
   return process.env.DEFAULT_SSO_ROLE || 'sales_rep';
 }
 
-/**
- * Generate a unique employee code based on role prefix.
- */
 async function generateEmployeeCode(knex, role) {
   const prefixMap = {
     sales_rep: 'SR', tbm: 'TBM', abm: 'ABM', zbm: 'ZBM',

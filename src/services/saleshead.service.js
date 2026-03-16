@@ -66,7 +66,6 @@ const SalesHeadService = {
     const activeFy = await getActiveFY();
     console.log('[getZbmHierarchy] activeFy:', activeFy);
 
-    // Get direct reports of any employee via reports_to
     const getDirectReports = async (empCode) => {
       const res = await getKnex().raw(
         `SELECT employee_code, full_name, designation, zone_name, area_name, territory_name, role
@@ -76,7 +75,6 @@ const SalesHeadService = {
       return res.rows;
     };
 
-    // Get product commitments for a sales rep
     const getRepCommitments = async (empCode) => {
       const rows = await db('ts_product_commitments AS pc')
         .leftJoin('product_master AS pm', 'pm.productcode', 'pc.product_code')
@@ -184,34 +182,135 @@ const SalesHeadService = {
 
   async getTeamYearlyTargets(shEmployeeCode, fiscalYear) {
     const fy = fiscalYear || await getActiveFY();
-    const directReports = await getKnex().raw(`SELECT employee_code, full_name FROM aop.ts_fn_get_direct_reports(?)`, [shEmployeeCode]);
-    const assignments = await db('ts_yearly_target_assignments AS yta').leftJoin('ts_auth_users AS u', 'u.employee_code', 'yta.assignee_code')
-      .where('yta.assigner_code', shEmployeeCode).where('yta.fiscal_year_code', fy)
-      .select('yta.*', 'u.full_name AS assignee_name', 'u.zone_name');
-    const members = directReports.rows.map((r) => {
-      const memberTargets = assignments.filter((a) => a.assignee_code === r.employee_code);
-      return { employeeCode: r.employee_code, fullName: r.full_name,
-        targets: memberTargets.map((a) => ({ id: a.id, productCode: a.product_code, categoryId: a.category_id, yearlyTarget: parseFloat(a.yearly_target || 0), status: a.status, zone: a.zone_name })) };
-    });
+    console.log('[getTeamYearlyTargets] shEmployeeCode:', shEmployeeCode, 'fy:', fy);
+
+    const computePrevFy = (fyCode) => {
+      const m = (fyCode || '').match(/FY(\d{2})_(\d{2})/);
+      if (m) return `FY${String(parseInt(m[1]) - 1).padStart(2, '0')}_${String(parseInt(m[2]) - 1).padStart(2, '0')}`;
+      return null;
+    };
+    const prevFy = computePrevFy(fy);
+    console.log('[getTeamYearlyTargets] prevFy for LY lookup:', prevFy);
+
+    const directReports = await getKnex().raw(
+      `SELECT employee_code, full_name, zone_name, zone_code, designation
+       FROM aop.ts_auth_users WHERE reports_to = ? AND is_active = true`,
+      [shEmployeeCode]
+    );
+    console.log('[getTeamYearlyTargets] direct reports:', directReports.rows.length);
+
+    const members = [];
+    for (const zbm of directReports.rows) {
+
+      const assignment = await db('ts_yearly_target_assignments')
+        .where({ fiscal_year_code: fy, manager_code: shEmployeeCode, assignee_code: zbm.employee_code })
+        .first();
+
+      let lyTargetValue   = parseFloat(assignment?.ly_target_value   || 0);
+      let lyAchievedValue = parseFloat(assignment?.ly_achieved_value  || 0);
+
+      if (!lyTargetValue && prevFy) {
+        const lyResult = await db('ts_yearly_target_assignments')
+          .where({ fiscal_year_code: prevFy, manager_code: zbm.employee_code })
+          .sum({ totalRev: 'ly_target_value' })
+          .first();
+        lyTargetValue = parseFloat(lyResult?.totalRev) || 0;
+
+        if (!lyTargetValue && zbm.zone_code) {
+          const lyCommit = await db('ts_product_commitments')
+            .where({ fiscal_year_code: prevFy, zone_code: zbm.zone_code })
+            .sum({ totalRev: 'target_revenue' })
+            .first();
+          lyTargetValue = parseFloat(lyCommit?.totalRev) || 0;
+        }
+      }
+
+      if (!lyAchievedValue && prevFy) {
+        const lyAch = await db('ts_yearly_target_assignments')
+          .where({ fiscal_year_code: prevFy, manager_code: zbm.employee_code })
+          .sum({ totalAchRev: 'ly_achieved_value' })
+          .first();
+        lyAchievedValue = parseFloat(lyAch?.totalAchRev) || 0;
+      }
+
+      if (assignment && (lyTargetValue > 0 || lyAchievedValue > 0)) {
+        await db('ts_yearly_target_assignments')
+          .where({ id: assignment.id })
+          .update({ ly_target_value: lyTargetValue, ly_achieved_value: lyAchievedValue, updated_at: new Date() });
+      }
+
+      members.push({
+        employeeCode:  zbm.employee_code,
+        fullName:      zbm.full_name,
+        zone:          zbm.zone_name,
+        designation:   zbm.designation,
+        lyTarget:      lyTargetValue,
+        lyAchieved:    lyAchievedValue,
+        cyTargetValue: parseFloat(assignment?.cy_target_value || 0),
+        status:        assignment?.status || 'not_set',
+        assignmentId:  assignment?.id || null,
+      });
+    }
+
+    console.log('[getTeamYearlyTargets] members built:', members.length);
     return { fiscalYear: fy, members };
   },
 
   async saveTeamYearlyTargets(targets, shUser, fiscalYear) {
-    const fy = fiscalYear || await getActiveFY(); const now = new Date();
+    const fy = fiscalYear || await getActiveFY();
+    const now = new Date();
+    console.log('[saveTeamYearlyTargets] saving', targets.length, 'targets for fy:', fy);
     for (const t of targets) {
-      await db('ts_yearly_target_assignments').insert({
-        fiscal_year_code: fy, assigner_code: shUser.employeeCode, assigner_role: shUser.role,
-        assignee_code: t.employeeCode, product_code: t.productCode, category_id: t.categoryId,
-        yearly_target: t.yearlyTarget, zone_code: t.zoneCode || null, status: 'draft', created_at: now, updated_at: now,
-      }).onConflict(getKnex().raw("(fiscal_year_code, assigner_code, assignee_code, product_code)"))
-        .merge({ yearly_target: t.yearlyTarget, status: 'draft', updated_at: now });
+      const assignee = await db('ts_auth_users').where({ employee_code: t.employeeCode }).first();
+      const existing = await db('ts_yearly_target_assignments')
+        .where({ fiscal_year_code: fy, manager_code: shUser.employeeCode, assignee_code: t.employeeCode })
+        .first();
+      const targetStatus = t.status || 'draft';
+      if (existing) {
+        await db('ts_yearly_target_assignments').where({ id: existing.id }).update({
+          cy_target_value: t.yearlyTarget || 0,
+          status: targetStatus,
+          updated_at: now,
+          ...(targetStatus === 'published' ? { published_at: now } : {}),
+        });
+      } else {
+        await db('ts_yearly_target_assignments').insert({
+          fiscal_year_code: fy,
+          manager_code: shUser.employeeCode,
+          manager_role: shUser.role,
+          assignee_code: t.employeeCode,
+          assignee_role: assignee?.role || 'zbm',
+          geo_level: 'zone',
+          zone_code: assignee?.zone_code || null,
+          zone_name: assignee?.zone_name || null,
+          cy_target_value: t.yearlyTarget || 0,
+          cy_target_qty: 0,
+          ly_target_value: 0,
+          ly_achieved_value: 0,
+          status: targetStatus,
+          ...(targetStatus === 'published' ? { published_at: now } : {}),
+          created_at: now,
+          updated_at: now,
+        });
+      }
     }
     return { success: true, savedCount: targets.length };
   },
 
   async getUniqueZbms(shEmployeeCode) {
-    const directReports = await getKnex().raw(`SELECT employee_code, full_name, designation, zone_name FROM aop.ts_fn_get_direct_reports(?)`, [shEmployeeCode]);
-    return directReports.rows.map((r) => ({ employeeCode: r.employee_code, fullName: r.full_name, designation: r.designation, zone: r.zone_name }));
+    console.log('[getUniqueZbms] called for:', shEmployeeCode);
+    const directReports = await getKnex().raw(
+      `SELECT employee_code, full_name, designation, zone_name
+       FROM aop.ts_auth_users WHERE reports_to = ? AND is_active = true`,
+      [shEmployeeCode]
+    );
+    console.log('[getUniqueZbms] found:', directReports.rows.length);
+    return directReports.rows.map((r) => ({
+      employeeCode: r.employee_code,
+      fullName: r.full_name,
+      designation: r.designation,
+      zone: r.zone_name,
+    }));
   },
 
   async getDashboardStats(shEmployeeCode) {

@@ -1,13 +1,3 @@
-/**
- * abm.service.js — Area Business Manager Service (v6 — FIXED)
- *
- * FIXES IN THIS VERSION:
- * 1. Replaced ts_fn_get_direct_reports DB function with inline reports_to query
- *    (same fix applied to ZBM). Falls back to area_code when reporting chain
- *    is not configured in the DB.
- * 2. getAreaTargets now loads ALL active products from product_master and merges
- *    in existing CY commitments + LY geography targets — mirrors TBM pattern.
- */
 'use strict';
 const { db, getKnex } = require('../config/database');
 const { formatCommitment, aggregateMonthlyTargets, calcGrowth } = require('../utils/helpers');
@@ -18,13 +8,6 @@ const getActiveFY = async () => {
   return fy?.code || 'FY26_27';
 };
 
-/* ─── inline helper: direct reports via reports_to (no DB function needed) ─── */
-
-/**
- * Returns all users who directly report to managerEmpCode.
- * Primary path: reports_to column.
- * Fallback: users in the same area_code when chain is not configured.
- */
 async function getAbmDirectReports(abmEmployeeCode) {
   const reports = await db('ts_auth_users')
     .where({ reports_to: abmEmployeeCode, is_active: true })
@@ -38,14 +21,12 @@ async function getAbmDirectReports(abmEmployeeCode) {
 
   if (reports.length > 0) return reports;
 
-  // Fallback: find all active users in the same area (except the ABM themselves)
   const abmUser = await db('ts_auth_users')
     .where({ employee_code: abmEmployeeCode, is_active: true })
     .first('area_code');
 
   if (abmUser?.area_code) {
-    // Fallback: only return roles that directly report to ABM (TBMs + specialists).
-    // Do NOT return SRs — they report to TBMs, not the ABM.
+
     const abmDirectRoles = await db('ts_user_roles')
       .where({ reporting_to: 'abm', is_active: true })
       .pluck('role_name');
@@ -66,7 +47,6 @@ async function getAbmDirectReports(abmEmployeeCode) {
   return [];
 }
 
-/* ─── shared month-name normalizer ─── */
 const MONTH_NAME_MAP = {
   april:'apr', may:'may', june:'jun', july:'jul',
   august:'aug', september:'sep', october:'oct', november:'nov',
@@ -84,10 +64,8 @@ const normalizeCat = (cat) => {
   return c.replace(/[\s-]+/g, '-');
 };
 
-/* ──────────────────────────────────────────────────────────────────────────── */
-
 const ABMService = {
-  // GET /abm/tbm-submissions
+
   async getTbmSubmissions(abmEmployeeCode, filters = {}) {
     const directReports = await getAbmDirectReports(abmEmployeeCode);
     const tbmCodes = directReports.map((r) => r.employee_code);
@@ -107,7 +85,6 @@ const ABMService = {
     return rows.map(formatCommitment);
   },
 
-  // PUT /abm/approve-tbm/:id
   async approveTbm(commitmentId, abmUser, { comments = '', corrections = null } = {}) {
     const commitment = await db('ts_product_commitments').where({ id: commitmentId }).first();
     if (!commitment) throw Object.assign(new Error('Commitment not found.'), { status: 404 });
@@ -127,7 +104,6 @@ const ABMService = {
     return { success: true, submissionId: commitmentId, action };
   },
 
-  // POST /abm/reject-tbm/:id
   async rejectTbm(commitmentId, abmUser, reason = '') {
     const commitment = await db('ts_product_commitments').where({ id: commitmentId }).first();
     if (!commitment) throw Object.assign(new Error('Commitment not found.'), { status: 404 });
@@ -139,7 +115,6 @@ const ABMService = {
     return { success: true, submissionId: commitmentId, action: 'rejected' };
   },
 
-  // POST /abm/bulk-approve-tbm
   async bulkApproveTbm(submissionIds, abmUser, comments = '') {
     const directReports = await getAbmDirectReports(abmUser.employeeCode);
     const tbmCodes = directReports.map((r) => r.employee_code);
@@ -151,15 +126,11 @@ const ABMService = {
     return { success: true, approvedCount: ids.length };
   },
 
-  // GET /abm/area-targets
-  // Mirrors TBM getTerritoryTargets: loads ALL active products from product_master,
-  // merges existing CY commitments for this ABM, then overlays LY from ts_geography_targets.
   async getAreaTargets(abmUser, fiscalYear) {
     const fy = fiscalYear || await getActiveFY();
     const areaCode = abmUser.areaCode || abmUser.area_code;
     const abmCode  = abmUser.employeeCode;
 
-    // 1. Load ALL active products
     const allProducts = await db('product_master')
       .where('isactive', true)
       .select(
@@ -172,7 +143,6 @@ const ABMService = {
       )
       .orderBy('product_family').orderBy('product_group').orderBy('product_subgroup');
 
-    // Build zero-initialized product map
     const productMap = {};
     allProducts.forEach((p) => {
       const code = p.productcode;
@@ -191,7 +161,6 @@ const ABMService = {
       });
     });
 
-    // 2. Merge existing CY commitments for this ABM
     const cyRows = await db('ts_product_commitments')
       .where('employee_code', abmCode)
       .where('fiscal_year_code', fy)
@@ -214,7 +183,6 @@ const ABMService = {
       }
     });
 
-    // 3. Overlay LY from ts_geography_targets (area level, prev FY)
     if (areaCode) {
       const prevFyCode = fy === 'FY26_27' ? 'FY25_26' : null;
       const lyFyCode = prevFyCode || fy;
@@ -242,7 +210,6 @@ const ABMService = {
     );
   },
 
-  // PUT /abm/area-targets/:id/save
   async saveAreaTarget(targetId, monthlyTargets, abmUser) {
     const target = await db('ts_geography_targets').where({ id: targetId }).first();
     if (!target) throw Object.assign(new Error('Target not found.'), { status: 404 });
@@ -250,7 +217,6 @@ const ABMService = {
     return { success: true, targetId };
   },
 
-  // POST /abm/area-targets/save
   async saveAreaTargetsBulk(targets, abmUser) {
     const fy = await getActiveFY();
     for (const t of targets) {
@@ -268,20 +234,17 @@ const ABMService = {
     return { success: true, savedCount: targets.length };
   },
 
-  // POST /abm/area-targets/submit
   async submitAreaTargets(targetIds, abmUser) {
     const now = new Date();
     const updated = await db('ts_geography_targets').whereIn('id', targetIds).where('status', 'draft').update({ status: 'published', published_at: now, updated_at: now });
     return { success: true, submittedCount: updated };
   },
 
-  // GET /abm/team-members
   async getTeamMembers(abmEmployeeCode) {
     const directReports = await getAbmDirectReports(abmEmployeeCode);
     return directReports.map((r) => ({ employeeCode: r.employee_code, fullName: r.full_name, designation: r.designation, territory: r.territory_name, role: r.role }));
   },
 
-  // GET /abm/tbm-hierarchy
   async getTbmHierarchy(abmEmployeeCode) {
     const directReports = await getAbmDirectReports(abmEmployeeCode);
     const activeFy = await getActiveFY(); const result = [];
@@ -296,7 +259,6 @@ const ABMService = {
     return result;
   },
 
-  // GET /abm/team-yearly-targets
   async getTeamYearlyTargets(abmEmployeeCode, fiscalYear) {
     const fy = fiscalYear || await getActiveFY();
     const directReports = await getAbmDirectReports(abmEmployeeCode);
@@ -311,7 +273,6 @@ const ABMService = {
     return { fiscalYear: fy, members };
   },
 
-  // POST /abm/team-yearly-targets/save
   async saveTeamYearlyTargets(targets, abmUser, fiscalYear) {
     const fy = fiscalYear || await getActiveFY(); const now = new Date();
     for (const t of targets) {
@@ -327,13 +288,11 @@ const ABMService = {
     return { success: true, savedCount: targets.length };
   },
 
-  // GET /abm/unique-tbms
   async getUniqueTbms(abmEmployeeCode) {
     const directReports = await getAbmDirectReports(abmEmployeeCode);
     return directReports.map((r) => ({ employeeCode: r.employee_code, fullName: r.full_name, designation: r.designation, territory: r.territory_name }));
   },
 
-  // GET /abm/dashboard-stats
   async getDashboardStats(abmEmployeeCode) {
     const activeFy = await getActiveFY();
     const directReports = await getAbmDirectReports(abmEmployeeCode);

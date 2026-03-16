@@ -44,7 +44,7 @@ app.use((req, res, next) => {
   });
   next();
 });
-const PORT = parseInt(process.env.PORT || '3001', 10);
+const PORT = parseInt(process.env.PORT || '4001', 10);
 const API_PREFIX = process.env.API_PREFIX || '/api/v1';
 const DEMO_MODE = process.env.DEMO_MODE === 'true';
 
@@ -52,7 +52,7 @@ const DEMO_MODE = process.env.DEMO_MODE === 'true';
 app.use(helmet());
 
 
-const corsOrigins = (process.env.CORS_ORIGINS || 'http://localhost:3000')
+const corsOrigins = (process.env.CORS_ORIGINS || 'http://localhost:4000')
   .split(',')
   .map((o) => o.trim());
 

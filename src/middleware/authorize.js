@@ -1,8 +1,3 @@
-/**
- * authorize.js — Role-Based Access Control Middleware
- * @version 1.0.0
- */
-
 function authorize(...allowedRoles) {
   return (req, res, next) => {
     if (!req.user) {

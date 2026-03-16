@@ -1,10 +1,3 @@
-/**
- * auth.js — Authentication Configuration
- * 
- * @version 2.0.0 - Dual-auth support (local + SSO)
- * @author Appasamy Associates - Target Setting PWA
- */
-
 const authConfig = {
 
   jwt: {

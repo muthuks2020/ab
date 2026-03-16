@@ -1,8 +1,3 @@
-/**
- * audit.js — Audit Logging Middleware
- * @version 2.0.0 - Migrated to aop.ts_* schema (v5)
- */
-
 const { db } = require('../config/database');
 
 const logAudit = async ({ actorCode, actorRole, action, entityType, entityId, detail, ipAddress }) => {

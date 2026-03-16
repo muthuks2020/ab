@@ -1,19 +1,7 @@
-/**
- * ABM Specialist Service
- * Business logic for ABM managing specialist submissions and yearly targets.
- * Chain: Specialist → ABM (review/approve) → ZBM → Sales Head
- *
- * @version 2.0.0 - Migrated to aop schema (v5)
- */
-
 'use strict';
 
 const { db } = require('../config/database');
 const { SPECIALIST_ROLES } = require('../utils/specialistConstants');
-
-// ──────────────────────────────────────────────────────────────────
-// Helpers
-// ──────────────────────────────────────────────────────────────────
 
 const getActiveFY = async () => {
   const fy = await db('ts_fiscal_years').where({ is_active: true }).first();
@@ -28,7 +16,6 @@ const getSpecialistCodes = async (abmEmployeeCode) => {
   return rows.map((r) => r.employee_code);
 };
 
-/** Format a ts_product_commitments row for ABM review (with JOINed fields) */
 const formatSubmission = (r) => ({
   id: r.id,
   fiscalYearCode: r.fiscal_year_code,
@@ -51,9 +38,6 @@ const formatSubmission = (r) => ({
   approvedByCode: r.approved_by_code,
 });
 
-// ======================================================================
-// GET /abm/specialist-submissions — with product_master JOIN
-// ======================================================================
 const getSpecialistSubmissions = async (abmEmployeeCode, fiscalYearCode) => {
   const fy = fiscalYearCode || await getActiveFY();
   const specialistCodes = await getSpecialistCodes(abmEmployeeCode);
@@ -75,9 +59,6 @@ const getSpecialistSubmissions = async (abmEmployeeCode, fiscalYearCode) => {
   return rows.map(formatSubmission);
 };
 
-// ======================================================================
-// PUT /abm/approve-specialist/:id
-// ======================================================================
 const approveSpecialist = async (commitmentId, abmUser, corrections, comments) => {
   const commitment = await db('ts_product_commitments').where({ id: commitmentId }).first();
   if (!commitment) {
@@ -91,7 +72,6 @@ const approveSpecialist = async (commitmentId, abmUser, corrections, comments) =
     throw err;
   }
 
-  // Verify specialist reports to this ABM
   const specialistCodes = await getSpecialistCodes(abmUser.employeeCode);
   if (!specialistCodes.includes(commitment.employee_code)) {
     const err = new Error('This specialist does not report to you');
@@ -123,7 +103,7 @@ const approveSpecialist = async (commitmentId, abmUser, corrections, comments) =
       status: 'approved',
       approved_at: now,
       approved_by_code: abmUser.employeeCode,
-      
+
       updated_at: now,
     });
 
@@ -131,7 +111,7 @@ const approveSpecialist = async (commitmentId, abmUser, corrections, comments) =
       commitment_id: commitmentId,
       action,
       actor_code: abmUser.employeeCode,
-      
+
       actor_role: abmUser.role,
       corrections: hasCorrections ? JSON.stringify(corrections) : null,
       original_values: originalValues ? JSON.stringify(originalValues) : null,
@@ -157,9 +137,6 @@ const approveSpecialist = async (commitmentId, abmUser, corrections, comments) =
   return { success: true };
 };
 
-// ======================================================================
-// POST /abm/bulk-approve-specialist
-// ======================================================================
 const bulkApproveSpecialist = async (submissionIds, abmUser) => {
   const specialistCodes = await getSpecialistCodes(abmUser.employeeCode);
 
@@ -184,7 +161,7 @@ const bulkApproveSpecialist = async (submissionIds, abmUser) => {
         status: 'approved',
         approved_at: now,
         approved_by_code: abmUser.employeeCode,
-        
+
         updated_at: now,
       });
 
@@ -192,7 +169,7 @@ const bulkApproveSpecialist = async (submissionIds, abmUser) => {
       commitment_id: id,
       action: 'bulk_approved',
       actor_code: abmUser.employeeCode,
-      
+
       actor_role: abmUser.role,
       created_at: now,
     }));
@@ -211,9 +188,6 @@ const bulkApproveSpecialist = async (submissionIds, abmUser) => {
   return { success: true, approvedCount: ids.length };
 };
 
-// ======================================================================
-// GET /abm/specialists
-// ======================================================================
 const getSpecialists = async (abmEmployeeCode) => {
   const rows = await db('ts_auth_users')
     .where({ reports_to: abmEmployeeCode, is_active: true })
@@ -234,14 +208,9 @@ const getSpecialists = async (abmEmployeeCode) => {
   }));
 };
 
-// ======================================================================
-// GET /abm/specialist-yearly-targets
-// ======================================================================
 const getSpecialistYearlyTargets = async (abmEmployeeCode, fiscalYearCode) => {
   const fy = fiscalYearCode || await getActiveFY();
 
-  // ts_yearly_target_assignments has no assignee_name/assignee_territory columns —
-  // JOIN ts_auth_users to get those fields.
   const rows = await db('ts_yearly_target_assignments AS yta')
     .leftJoin('ts_auth_users AS u', 'u.employee_code', 'yta.assignee_code')
     .where({ 'yta.manager_code': abmEmployeeCode, 'yta.fiscal_year_code': fy })
@@ -253,8 +222,6 @@ const getSpecialistYearlyTargets = async (abmEmployeeCode, fiscalYearCode) => {
     )
     .orderBy('u.full_name');
 
-  // When no assignment rows exist yet, build skeleton rows from the specialists list
-  // so the UI always shows all specialists (not a blank page).
   if (rows.length === 0) {
     const specialists = await db('ts_auth_users')
       .where({ reports_to: abmEmployeeCode, is_active: true })
@@ -296,9 +263,6 @@ const getSpecialistYearlyTargets = async (abmEmployeeCode, fiscalYearCode) => {
   }));
 };
 
-// ======================================================================
-// POST /abm/specialist-yearly-targets/save
-// ======================================================================
 const saveSpecialistYearlyTargets = async (targets, abmUser, fiscalYearCode) => {
   const fy = fiscalYearCode || await getActiveFY();
   const now = new Date();
@@ -344,9 +308,6 @@ const saveSpecialistYearlyTargets = async (targets, abmUser, fiscalYearCode) => 
   return { success: true };
 };
 
-// ======================================================================
-// POST /abm/specialist-yearly-targets/publish
-// ======================================================================
 const publishSpecialistYearlyTargets = async (targets, abmUser, fiscalYearCode) => {
   await saveSpecialistYearlyTargets(targets, abmUser, fiscalYearCode);
 
@@ -371,9 +332,6 @@ const publishSpecialistYearlyTargets = async (targets, abmUser, fiscalYearCode) 
   return { success: true };
 };
 
-// ======================================================================
-// GET /abm/specialist-dashboard-stats
-// ======================================================================
 const getSpecialistDashboardStats = async (abmEmployeeCode, fiscalYearCode) => {
   const fy = fiscalYearCode || await getActiveFY();
   const specialistCodes = await getSpecialistCodes(abmEmployeeCode);

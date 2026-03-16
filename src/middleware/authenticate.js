@@ -1,14 +1,5 @@
-/**
- * authenticate.js — Simple token-based authentication middleware
- *
- * Token format: base64(userId) — no JWT, no secrets, works on HTTP and HTTPS
- *
- * @version 7.0.0 - Removed JWT entirely. Decode base64 → fetch user from DB.
- */
-
 const db = require('../config/database');
 
-// ── Role normalizer ────────────────────────────────────────────────────────
 const ROLE_MAP = {
   'sales_rep'                         : 'sales_rep',
   'sales rep'                         : 'sales_rep',
@@ -92,7 +83,6 @@ function normalizeRole(rawRole) {
   return mapped || null;
 }
 
-// ── Demo user profiles (used when DEMO_MODE=true) ──────────────────────────
 const DEMO_USERS = {
   sales_rep  : { id: 1,  employeeCode: 'E-000001', employee_code: 'E-000001', username: 'salesrep',  name: 'Demo Sales Rep',   fullName: 'Demo Sales Rep',   email: 'salesrep@appasamy.com',  role: 'sales_rep',  designation: 'Sales Representative',          zone_code: 'Z3', zone_name: 'Zone-3', area_code: 'A-BHR', area_name: 'Bihar', territory_code: 'T-BHR-PAT-1', territory_name: 'Bihar(Patna)-1', reports_to: 'E-000002', isVacant: false },
   tbm        : { id: 2,  employeeCode: 'E-000002', employee_code: 'E-000002', username: 'tbm',        name: 'Demo TBM',         fullName: 'Demo TBM',         email: 'tbm@appasamy.com',       role: 'tbm',        designation: 'Territory Business Manager',     zone_code: 'Z3', zone_name: 'Zone-3', area_code: 'A-BHR', area_name: 'Bihar', territory_code: 'T-BHR-PAT-1', territory_name: 'Bihar(Patna)-1', reports_to: 'E-000003', isVacant: false },
@@ -115,7 +105,6 @@ function getDemoUser(req) {
   return DEMO_USERS[role] || DEMO_USERS.sales_rep;
 }
 
-// ── Token decode ───────────────────────────────────────────────────────────
 function decodeToken(token) {
   try {
     const decoded = Buffer.from(token, 'base64').toString('utf8');
@@ -127,16 +116,14 @@ function decodeToken(token) {
   }
 }
 
-// ── Main middleware ────────────────────────────────────────────────────────
 async function authenticate(req, res, next) {
   try {
-    // Demo mode — bypass all auth
+
     if (DEMO_MODE) {
       req.user = getDemoUser(req);
       return next();
     }
 
-    // Extract Bearer token
     const authHeader = req.headers.authorization;
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
       return res.status(401).json({ success: false, message: 'Access denied. No token provided.' });
@@ -149,7 +136,6 @@ async function authenticate(req, res, next) {
       return res.status(401).json({ success: false, message: 'Invalid token.' });
     }
 
-    // Fetch user from DB
     const knex = db.getKnex();
     const user = await knex('aop.ts_auth_users')
       .where('id', userId)
@@ -160,7 +146,6 @@ async function authenticate(req, res, next) {
       return res.status(401).json({ success: false, message: 'User account not found or deactivated.' });
     }
 
-    // Normalize role
     const normalizedRole = normalizeRole(user.role);
     if (!normalizedRole) {
       console.error(`[Auth] Cannot map DB role "${user.role}" for user ${user.email}`);

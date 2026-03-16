@@ -1,7 +1,3 @@
-/**
- * tbm.controller.js — NO logic changes (thin controller)
- * @version 2.0.0 - Updated audit entity types to ts_ prefix
- */
 const TBMService = require('../services/tbm.service');
 const { successResponse, errorResponse } = require('../utils/helpers');
 
@@ -73,7 +69,7 @@ const TBMController = {
   },
   async getYearlyTargets(req, res, next) {
     try {
-      // Normalize fy param: accept both "2026-27" and "FY26_27" formats
+
       const rawFy = req.query.fy;
       const fy = rawFy
         ? rawFy.startsWith('FY')

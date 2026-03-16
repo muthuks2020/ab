@@ -28,13 +28,13 @@ router.get('/team-targets/summary', TBMController.getTeamTargetsSummary);
 router.get('/team-targets/:repId', TBMController.getTeamTargetsForRep);
 router.post('/team-targets/:repId/save', TBMController.saveTeamTargetsForRep);
 router.post('/team-targets/:repId/assign', TBMController.assignTeamTargetsToRep);
-// Team members
+
 router.get('/team-members', TBMController.getTeamMembers);
 router.get('/unique-reps', TBMController.getUniqueReps);
-// Aliases: FE uses team-yearly-targets, BE has yearly-targets
+
 router.get('/team-yearly-targets', TBMController.getYearlyTargets);
 router.post('/team-yearly-targets/save', TBMController.saveYearlyTargets);
-// Single target save by ID
+
 router.put('/territory-targets/:id/save', TBMController.saveSingleTerritoryTarget);
 router.put('/individual-targets/:id/save', TBMController.saveSingleIndividualTarget);
 module.exports = router;

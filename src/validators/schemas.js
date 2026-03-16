@@ -1,9 +1,3 @@
-/**
- * schemas.js — Joi Validation Schemas
- * @version 2.1.0 - Fixed .allow(null) for corrections & comments across approval schemas.
- *                   Migrated to aop schema (v5). Removed productId/productDbId.
- */
-
 const Joi = require('joi');
 
 const MONTHS = ['apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec', 'jan', 'feb', 'mar'];
@@ -21,7 +15,6 @@ const monthlyTargetsSchema = Joi.object(
   MONTHS.reduce((acc, m) => { acc[m] = monthDataSchema.optional(); return acc; }, {})
 ).required();
 
-// Auth schemas
 const loginSchema = Joi.object({
   username: Joi.string().required().trim(),
   password: Joi.string().required(),
@@ -31,7 +24,6 @@ const refreshTokenSchema = Joi.object({
   refreshToken: Joi.string().required(),
 });
 
-// Sales rep product schemas (v5: productCode instead of productId)
 const saveProductSchema = Joi.object({
   monthlyTargets: monthlyTargetsSchema,
   productCode: Joi.string().allow(null, '').optional(),
@@ -55,8 +47,6 @@ const saveAllProductsSchema = Joi.object({
   ).min(1).required(),
 });
 
-// ─── Approval schemas (shared by TBM, ABM, ZBM, Sales Head) ─────────────
-// FIX: added .allow(null) so frontend can send { corrections: null }
 const approveSchema = Joi.object({
   comments: Joi.string().allow(null, '').optional(),
   corrections: Joi.object().allow(null).optional(),
@@ -67,7 +57,6 @@ const bulkApproveSchema = Joi.object({
   comments: Joi.string().allow(null, '').optional(),
 });
 
-// Territory target schemas
 const saveTerritoryTargetsSchema = Joi.object({
   targets: Joi.array().items(
     Joi.object({
@@ -81,7 +70,6 @@ const submitTerritoryTargetsSchema = Joi.object({
   targetIds: Joi.array().items(Joi.number().integer().positive()).min(1).required(),
 });
 
-// Yearly target schemas
 const saveYearlyTargetsSchema = Joi.object({
   fiscalYear: Joi.string().required(),
   members: Joi.array().items(
@@ -107,7 +95,6 @@ const publishYearlyTargetsSchema = Joi.object({
   ).min(1).required(),
 });
 
-// Query schemas
 const fiscalYearQuery = Joi.object({
   fy: Joi.string().optional(),
 });
@@ -120,7 +107,6 @@ const paginationQuery = Joi.object({
   salesRepId: Joi.string().optional(),
 });
 
-// NEW v5: Geography targets
 const geographyTargetSchema = Joi.object({
   geoLevel: Joi.string().valid('zone', 'area', 'territory').required(),
   geoCode: Joi.string().required(),
@@ -134,7 +120,6 @@ const geographyTargetSchema = Joi.object({
   ).min(1).required(),
 });
 
-// NEW v5: Employee transfer
 const transferEmployeeSchema = Joi.object({
   employeeCode: Joi.string().required(),
   newGeo: Joi.object({

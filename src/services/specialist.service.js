@@ -1,28 +1,14 @@
-/**
- * Specialist Service
- * Business logic for Specialist's own product commitments.
- * Specialist → ABM → ZBM → Sales Head
- *
- * @version 2.0.0 - Migrated to aop schema (v5). Removed duplicate formatCommitment.
- */
-
 'use strict';
 
 const { db } = require('../config/database');
 const { FISCAL_MONTHS, QUARTERS } = require('../utils/specialistConstants');
 const { formatCommitment, aggregateMonthlyTargets, calcGrowth } = require('../utils/helpers');
 
-// ─────────────────────────────────────────────────────────────────
-// Helper: active fiscal year
-// ─────────────────────────────────────────────────────────────────
 const getActiveFY = async () => {
   const fy = await db('ts_fiscal_years').where({ is_active: true }).first();
   return fy?.code || 'FY26_27';
 };
 
-// ─────────────────────────────────────────────────────────────────
-// Helper: verify ownership
-// ─────────────────────────────────────────────────────────────────
 const getOwnCommitment = async (commitmentId, employeeCode) => {
   const row = await db('ts_product_commitments')
     .where({ id: commitmentId, employee_code: employeeCode })
@@ -35,9 +21,6 @@ const getOwnCommitment = async (commitmentId, employeeCode) => {
   return row;
 };
 
-// ======================================================================
-// GET /specialist/products — with product_master JOIN
-// ======================================================================
 const getProducts = async (employeeCode, fiscalYearCode) => {
   const fy = fiscalYearCode || await getActiveFY();
   const rows = await db('ts_product_commitments AS pc')
@@ -49,9 +32,6 @@ const getProducts = async (employeeCode, fiscalYearCode) => {
   return rows.map(formatCommitment);
 };
 
-// ======================================================================
-// PUT /specialist/products/:id/save
-// ======================================================================
 const saveProduct = async (commitmentId, monthlyTargets, user) => {
   const row = await getOwnCommitment(commitmentId, user.employeeCode);
   if (row.status === 'submitted' || row.status === 'approved') {
@@ -63,7 +43,7 @@ const saveProduct = async (commitmentId, monthlyTargets, user) => {
     monthly_targets: JSON.stringify(monthlyTargets),
     status: 'draft',
   });
-  // Re-fetch with JOIN
+
   const updated = await db('ts_product_commitments AS pc')
     .join('product_master AS pm', 'pm.productcode', 'pc.product_code')
     .where('pc.id', commitmentId)
@@ -72,9 +52,6 @@ const saveProduct = async (commitmentId, monthlyTargets, user) => {
   return formatCommitment(updated);
 };
 
-// ======================================================================
-// POST /specialist/products/:id/submit
-// ======================================================================
 const submitProduct = async (commitmentId, user, comments = '') => {
   const row = await getOwnCommitment(commitmentId, user.employeeCode);
   if (row.status !== 'draft') {
@@ -90,16 +67,13 @@ const submitProduct = async (commitmentId, user, comments = '') => {
     commitment_id: commitmentId,
     action: 'submitted',
     actor_code: user.employeeCode,
-    
+
     actor_role: user.role,
     comments,
   });
   return { success: true, id: commitmentId, status: 'submitted' };
 };
 
-// ======================================================================
-// POST /specialist/products/submit-multiple
-// ======================================================================
 const submitMultiple = async (productIds, user) => {
   const rows = await db('ts_product_commitments')
     .whereIn('id', productIds)
@@ -119,9 +93,6 @@ const submitMultiple = async (productIds, user) => {
   return { success: true, submittedCount: ids.length };
 };
 
-// ======================================================================
-// POST /specialist/products/save-all
-// ======================================================================
 const saveAll = async (products, user) => {
   let savedCount = 0;
   for (const p of products) {
@@ -139,9 +110,6 @@ const saveAll = async (products, user) => {
   return { success: true, savedCount };
 };
 
-// ======================================================================
-// GET /specialist/dashboard-summary
-// ======================================================================
 const getDashboardSummary = async (employeeCode) => {
   const fy = await getActiveFY();
   const rows = await db('ts_product_commitments')
@@ -171,9 +139,6 @@ const getDashboardSummary = async (employeeCode) => {
   };
 };
 
-// ======================================================================
-// GET /specialist/quarterly-summary
-// ======================================================================
 const getQuarterlySummary = async (employeeCode, fiscalYearCode) => {
   const fy = fiscalYearCode || await getActiveFY();
 

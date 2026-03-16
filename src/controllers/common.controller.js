@@ -1,6 +1,3 @@
-/**
- * common.controller.js — NO CHANGES from v4 (thin controller)
- */
 const CommonService = require('../services/common.service');
 const { successResponse, errorResponse } = require('../utils/helpers');
 

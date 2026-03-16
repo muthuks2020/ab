@@ -1,8 +1,5 @@
 'use strict';
-/**
- * errorHandler.js — Global error handler
- * @version 2.0.0
- */
+
 const logger = console;
 
 const errorHandler = (err, req, res, _next) => {

@@ -1,8 +1,3 @@
-/**
- * auth.service.js — Authentication Service
- * @version 2.0.0 - Migrated to aop schema (v5)
- */
-
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { v4: uuidv4 } = require('uuid');

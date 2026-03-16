@@ -1,4 +1,3 @@
-
 const db = require('../config/database');
 
 const ROLE_LABELS = {
@@ -16,7 +15,6 @@ const ROLE_LABELS = {
   eq_mgr_surgical    : 'Equipment Manager (Surgical)',
 };
 
-// Must mirror authenticate.js ROLE_MAP exactly
 const ROLE_MAP = {
   'sales_rep'                         : 'sales_rep',
   'sales rep'                         : 'sales_rep',
@@ -76,14 +74,10 @@ function normalizeRole(raw) {
   return ROLE_MAP[raw.trim().toLowerCase()] || null;
 }
 
-// Simple token: base64(userId) — no JWT, no secret, HTTP/HTTPS agnostic
 function makeToken(userId) {
   return Buffer.from(String(userId)).toString('base64');
 }
 
-// ═══════════════════════════════════════════════════════════════════
-// POST /auth/login
-// ═══════════════════════════════════════════════════════════════════
 async function login(req, res) {
   try {
     const { email } = req.body;
@@ -117,16 +111,10 @@ async function login(req, res) {
   }
 }
 
-// ═══════════════════════════════════════════════════════════════════
-// POST /auth/logout
-// ═══════════════════════════════════════════════════════════════════
 async function logout(req, res) {
   return res.json({ success: true, message: 'Logged out successfully' });
 }
 
-// ═══════════════════════════════════════════════════════════════════
-// GET /auth/me
-// ═══════════════════════════════════════════════════════════════════
 async function me(req, res) {
   try {
     const knex = db.getKnex();
@@ -147,9 +135,6 @@ async function me(req, res) {
   }
 }
 
-// ═══════════════════════════════════════════════════════════════════
-// HELPER — always returns normalized role
-// ═══════════════════════════════════════════════════════════════════
 function formatUser(user) {
   const normalizedRole = normalizeRole(user.role) || user.role;
   return {
@@ -160,7 +145,7 @@ function formatUser(user) {
     fullName       : user.full_name,
     username       : user.username,
     email          : user.email,
-    role           : normalizedRole,                          // ← always "sales_rep", "tbm" etc.
+    role           : normalizedRole,
     roleLabel      : ROLE_LABELS[normalizedRole] || user.role,
     designation    : user.designation,
     territory      : user.territory_name || user.area_name || user.zone_name || 'Unassigned',

@@ -1,16 +1,8 @@
-/**
- * commitment.service.js — Product Commitment Service (Sales Rep scope)
- * @version 2.0.0 - Migrated to aop schema (v5). JOINs to product_master for product details.
- */
-
 const { db } = require('../config/database');
 const { formatCommitment, aggregateMonthlyTargets, calcGrowth, MONTHS } = require('../utils/helpers');
 
 const CommitmentService = {
 
-  /**
-   * PUT /products/:id/targets/:month — Update single month
-   */
   async updateMonthlyTarget(commitmentId, month, data, user) {
     const commitment = await db('ts_product_commitments').where({ id: commitmentId }).first();
     if (!commitment) throw Object.assign(new Error('Commitment not found.'), { status: 404 });
@@ -28,15 +20,10 @@ const CommitmentService = {
     return { success: true, productId: commitmentId, month, data };
   },
 
-  /**
-   * GET /products — returns commitments with product details from product_master JOIN
-   */
   async getProducts(employeeCode, fiscalYearCode) {
     const activeFy = fiscalYearCode
       || (await db('ts_fiscal_years').where('is_active', true).first())?.code;
 
-    // DISTINCT ON subquery — product_master has duplicate productcodes,
-    // a direct JOIN would multiply commitment rows and double all values.
     const pmSubquery = db('product_master')
       .distinctOn('productcode')
       .select('productcode', 'product_name', 'product_category', 'product_family', 'product_subgroup', 'quota_price__c AS unit_cost')
@@ -55,9 +42,6 @@ const CommitmentService = {
     return rows.map(formatCommitment);
   },
 
-  /**
-   * PUT /products/:id/save — save draft targets
-   */
   async saveProduct(commitmentId, monthlyTargets, user) {
     const commitment = await db('ts_product_commitments').where({ id: commitmentId }).first();
     if (!commitment) {
@@ -77,7 +61,6 @@ const CommitmentService = {
         status: 'draft',
       });
 
-    // Re-fetch with DISTINCT ON subquery to avoid duplicate rows from product_master
     const pmSub = db('product_master')
       .distinctOn('productcode')
       .select('productcode', 'product_name', 'product_category', 'product_family', 'product_subgroup', 'quota_price__c AS unit_cost')
@@ -92,9 +75,6 @@ const CommitmentService = {
     return formatCommitment(updated);
   },
 
-  /**
-   * POST /products/:id/submit — submit for manager approval
-   */
   async submitProduct(commitmentId, user, comments = '') {
     const commitment = await db('ts_product_commitments').where({ id: commitmentId }).first();
     if (!commitment) throw Object.assign(new Error('Commitment not found.'), { status: 404 });
@@ -113,7 +93,7 @@ const CommitmentService = {
       commitment_id: commitmentId,
       action: 'submitted',
       actor_code: user.employeeCode,
-      
+
       actor_role: user.role,
       comments,
     });
@@ -121,9 +101,6 @@ const CommitmentService = {
     return { success: true, productId: commitmentId, status: 'submitted' };
   },
 
-  /**
-   * POST /products/submit-multiple — bulk submit
-   */
   async submitMultiple(productIds, user) {
     const commitments = await db('ts_product_commitments')
       .whereIn('id', productIds)
@@ -144,7 +121,7 @@ const CommitmentService = {
       commitment_id: id,
       action: 'submitted',
       actor_code: user.employeeCode,
-      
+
       actor_role: user.role,
     }));
     await db('ts_commitment_approvals').insert(approvalRows);
@@ -152,13 +129,9 @@ const CommitmentService = {
     return { success: true, submittedCount: validIds.length };
   },
 
-  /**
-   * POST /products/save-all — bulk save drafts
-   */
   async saveAll(products, user) {
     let savedCount = 0;
 
-    // Fetch unit_cost for all products in one query
     const productIds = products.map((p) => p.id);
     const pmSub = db('product_master')
       .distinctOn('productcode')
@@ -176,11 +149,10 @@ const CommitmentService = {
     );
 
     for (const p of products) {
-      if (!unitCostMap.hasOwnProperty(p.id)) continue; // not found or wrong status
+      if (!unitCostMap.hasOwnProperty(p.id)) continue;
 
       const unitCost = unitCostMap[p.id];
 
-      // Compute cyRev = cyQty × unit_cost for each month
       const enrichedTargets = {};
       for (const [month, data] of Object.entries(p.monthlyTargets || {})) {
         enrichedTargets[month] = {
@@ -200,20 +172,11 @@ const CommitmentService = {
     return { success: true, savedCount };
   },
 
-  /**
-   * GET /salesrep/dashboard-summary
-   * targetValue = cy_target_value published by TBM in ts_yearly_target_assignments
-   *               (what TBM assigned as THIS year's target for the SR)
-   * cyRev       = sum of cyRev entered by sales rep in monthly_targets (cyQty x unit_cost)
-   */
   async getDashboardSummary(employeeCode) {
-    // activeFy = FY25_26 (current product commitment year — stays active always)
+
     const activeFy = await db('ts_fiscal_years').where('is_active', true).first();
     if (!activeFy) return null;
 
-    // nextFy = FY26_27 — yearly target assignments (ly_target_value, cy_target_value)
-    // are stored under the NEXT fiscal year, not the active one.
-    // Compute by incrementing the two digit pairs in FY25_26 → FY26_27
     const nextFyCode = activeFy.code.replace(/FY(\d{2})_(\d{2})/, (_, y1, y2) =>
       `FY${String(parseInt(y1) + 1).padStart(2,'0')}_${String(parseInt(y2) + 1).padStart(2,'0')}`
     );
@@ -225,8 +188,6 @@ const CommitmentService = {
 
     const totals = aggregateMonthlyTargets(commitments);
 
-    // ── LY Revenue: from ts_yearly_target_assignments under NEXT FY (ly_target_value = LY target set by TBM)
-    // Fallback to SUM(target_revenue) from ts_product_commitments flat column
     const lyAssignRow = await db('ts_yearly_target_assignments')
       .where({ assignee_code: employeeCode, fiscal_year_code: nextFyCode })
       .sum('ly_target_value as total')
@@ -241,7 +202,6 @@ const CommitmentService = {
       ? parseFloat(lyAssignRow.total)
       : (lyRevFlatRow?.total ? parseFloat(lyRevFlatRow.total) : 0);
 
-    // ── CY Target: TBM-assigned target stored under NEXT FY (cy_target_value)
     const cyAssignRow = await db('ts_yearly_target_assignments')
       .where({ assignee_code: employeeCode, fiscal_year_code: nextFyCode })
       .sum('cy_target_value as total')
@@ -254,11 +214,11 @@ const CommitmentService = {
     return {
       ...totals,
       lyRev,
-      targetValue,  // TBM's CY target for this SR (from FY26_27 row)
+      targetValue,
       qtyGrowth: calcGrowth(totals.lyQty, totals.cyQty),
       revGrowth: calcGrowth(targetValue, totals.cyRev),
       aopAchievementPct: targetValue > 0 ? Math.round((totals.cyRev / targetValue) * 100) : 0,
-      fiscalYear: nextFyLabel,   // "2026-27" — shown in grid header
+      fiscalYear: nextFyLabel,
       totalProducts: commitments.length,
       draftCount: commitments.filter((c) => c.status === 'draft').length,
       submittedCount: commitments.filter((c) => c.status === 'submitted').length,
@@ -266,9 +226,6 @@ const CommitmentService = {
     };
   },
 
-  /**
-   * GET /salesrep/quarterly-summary
-   */
   async getQuarterlySummary(employeeCode, fiscalYearCode) {
     const fy = fiscalYearCode || (await db('ts_fiscal_years').where('is_active', true).first())?.code;
     if (!fy) return { categories: [] };
@@ -313,9 +270,6 @@ const CommitmentService = {
     return { categories };
   },
 
-  /**
-   * GET /salesrep/category-performance
-   */
   async getCategoryPerformance(employeeCode) {
     const activeFy = await db('ts_fiscal_years').where('is_active', true).first();
     if (!activeFy) return [];
@@ -353,7 +307,7 @@ const CommitmentService = {
       contribution: totalCyRev > 0 ? Math.round((data.cyRev / totalCyRev) * 100 * 10) / 10 : 0,
     }));
   },
-  // PUT /products/:id/approve — manager approves a commitment
+
   async approveProduct(commitmentId, managerUser, comments = '') {
     const commitment = await db('ts_product_commitments').where({ id: commitmentId }).first();
     if (!commitment) throw Object.assign(new Error('Commitment not found.'), { status: 404 });
@@ -364,7 +318,6 @@ const CommitmentService = {
     return { success: true, submissionId: commitmentId, action: 'approved' };
   },
 
-  // PUT /products/:id/reject — manager rejects a commitment back to draft
   async rejectProduct(commitmentId, managerUser, reason = '') {
     const commitment = await db('ts_product_commitments').where({ id: commitmentId }).first();
     if (!commitment) throw Object.assign(new Error('Commitment not found.'), { status: 404 });

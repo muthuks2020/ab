@@ -1,7 +1,3 @@
-/**
- * admin.service.js — Admin Service (v5)
- * Full user CRUD, product management, fiscal year management, employee transfers, vacant positions.
- */
 'use strict';
 const { db } = require('../config/database');
 const bcrypt = require('bcrypt');
@@ -12,9 +8,7 @@ const getActiveFY = async () => {
 };
 
 const AdminService = {
-  // ─── User Management ────────────────────────────────────────────────
 
-  // GET /admin/users
   async getUsers(filters = {}) {
     let query = db('ts_auth_users').orderBy('full_name');
     if (filters.role) query = query.where('role', filters.role);
@@ -33,7 +27,6 @@ const AdminService = {
     }));
   },
 
-  // POST /admin/users
   async createUser(data) {
     const existing = await db('ts_auth_users').where('employee_code', data.employeeCode).first();
     if (existing) throw Object.assign(new Error('Employee code already exists.'), { status: 409 });
@@ -50,7 +43,6 @@ const AdminService = {
     return { success: true, user: { id: user.id, employeeCode: user.employee_code, fullName: user.full_name } };
   },
 
-  // PUT /admin/users/:id
   async updateUser(userId, data) {
     const user = await db('ts_auth_users').where({ id: userId }).first();
     if (!user) throw Object.assign(new Error('User not found.'), { status: 404 });
@@ -75,7 +67,6 @@ const AdminService = {
     return { success: true };
   },
 
-  // DELETE /admin/users/:id (soft delete)
   async deleteUser(userId) {
     const user = await db('ts_auth_users').where({ id: userId }).first();
     if (!user) throw Object.assign(new Error('User not found.'), { status: 404 });
@@ -83,7 +74,6 @@ const AdminService = {
     return { success: true };
   },
 
-  // PUT /admin/users/:id/toggle-status
   async toggleUserStatus(userId) {
     const user = await db('ts_auth_users').where({ id: userId }).first();
     if (!user) throw Object.assign(new Error('User not found.'), { status: 404 });
@@ -91,9 +81,6 @@ const AdminService = {
     return { success: true, isActive: !user.is_active };
   },
 
-  // ─── Employee Transfers ─────────────────────────────────────────────
-
-  // POST /admin/transfer-employee  AND  POST /admin/reassign-position
   async transferEmployee(employeeCode, newGeo, transferredBy, reason) {
     const user = await db('ts_auth_users').where('employee_code', employeeCode).first();
     if (!user) throw Object.assign(new Error('Employee not found.'), { status: 404 });
@@ -118,7 +105,6 @@ const AdminService = {
     return { success: true };
   },
 
-  // GET /admin/transfer-history
   async getTransferHistory(employeeCode) {
     let query = db('ts_employee_territory_log').orderBy('effective_date', 'desc');
     if (employeeCode) query = query.where('employee_code', employeeCode);
@@ -132,9 +118,6 @@ const AdminService = {
     }));
   },
 
-  // ─── Product Management (read from product_master, admin can't edit SF data) ─
-
-  // GET /admin/products
   async getProducts(filters = {}) {
     let query = db('product_master').orderBy('product_name');
     if (filters.category) query = query.where('product_category', filters.category);
@@ -148,12 +131,10 @@ const AdminService = {
     }));
   },
 
-  // GET /admin/categories
   async getCategories() {
     return db('ts_product_categories').where('is_active', true).orderBy('display_order');
   },
 
-  // PUT /admin/products/:code/toggle-status (toggle local active flag if applicable)
   async toggleProductStatus(productCode) {
     const product = await db('product_master').where('productcode', productCode).first();
     if (!product) throw Object.assign(new Error('Product not found.'), { status: 404 });
@@ -161,17 +142,11 @@ const AdminService = {
     return { success: true, isActive: !product.isactive };
   },
 
-  // ─── Org Hierarchy ──────────────────────────────────────────────────
-
-  // GET /admin/hierarchy
   async getHierarchy() {
     const rows = await db('ts_v_org_hierarchy');
     return rows;
   },
 
-  // ─── Vacant Positions ───────────────────────────────────────────────
-
-  // GET /admin/vacant-positions
   async getVacantPositions() {
     const rows = await db('ts_auth_users').where({ is_vacant: true, is_active: true }).orderBy('territory_name');
     return rows.map((r) => ({
@@ -182,7 +157,6 @@ const AdminService = {
     }));
   },
 
-  // PUT /admin/vacant-positions/:id/fill
   async fillVacantPosition(positionId, data) {
     const position = await db('ts_auth_users').where({ id: positionId, is_vacant: true }).first();
     if (!position) throw Object.assign(new Error('Vacant position not found.'), { status: 404 });
@@ -196,23 +170,16 @@ const AdminService = {
     return { success: true };
   },
 
-  // ─── Fiscal Year Management ─────────────────────────────────────────
-
-  // GET /admin/fiscal-years
   async getFiscalYears() {
     return db('ts_fiscal_years').orderBy('start_date', 'desc');
   },
 
-  // PUT /admin/fiscal-years/:fyCode/activate
   async activateFiscalYear(fyCode) {
     await db('ts_fiscal_years').update({ is_active: false });
     await db('ts_fiscal_years').where('code', fyCode).update({ is_active: true });
     return { success: true, activatedFY: fyCode };
   },
 
-  // ─── Dashboard Stats ───────────────────────────────────────────────
-
-  // GET /admin/dashboard-stats
   async getDashboardStats() {
     const activeFy = await getActiveFY();
     const totalUsers = await db('ts_auth_users').where('is_active', true).count('id as count').first();

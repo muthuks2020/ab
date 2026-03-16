@@ -42,8 +42,6 @@ async function destroy() {
   }
 }
 
-// ★ KEY FIX: db is a function (lazy) — NOT called at require time
-// This ensures dotenv has loaded before the first DB call
 function db(table) {
   return getKnex()(table);
 }

@@ -1,8 +1,3 @@
-/**
- * specialistConstants.js — Constants for Specialist features
- * @version 1.0.0
- */
-
 'use strict';
 
 const SPECIALIST_ROLES = [

@@ -1,23 +1,11 @@
-/**
- * authenticate.js — Dual-Auth Middleware
- * 
- * Verifies the app JWT on protected routes.
- * 
- * @version 3.0.0 - Migrated to aop.ts_* schema (v5)
- * @author Appasamy Associates - Target Setting PWA
- */
-
 const jwt = require('jsonwebtoken');
 const db = require('../config/database');
 
 const JWT_SECRET = process.env.JWT_SECRET || 'appasamy-target-setting-jwt-secret-change-me';
 
-/**
- * Main authentication middleware.
- */
 async function authenticate(req, res, next) {
   try {
-    // ── Step 1: Extract token ───────────────────────────────────────────
+
     const authHeader = req.headers.authorization;
 
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
@@ -36,7 +24,6 @@ async function authenticate(req, res, next) {
       });
     }
 
-    // ── Step 2: Verify JWT ──────────────────────────────────────────────
     let decoded;
     try {
       decoded = jwt.verify(token, JWT_SECRET);
@@ -54,7 +41,6 @@ async function authenticate(req, res, next) {
       });
     }
 
-    // ── Step 3: Check session is not revoked ────────────────────────────
     const knex = db.getKnex();
 
     if (decoded.jti) {
@@ -73,7 +59,6 @@ async function authenticate(req, res, next) {
       }
     }
 
-    // ── Step 4: Fetch user and verify active ────────────────────────────
     const user = await knex('ts_auth_users')
       .where('id', decoded.id || decoded.userId)
       .andWhere('is_active', true)
@@ -86,7 +71,6 @@ async function authenticate(req, res, next) {
       });
     }
 
-    // ── Step 5: Attach user to request ──────────────────────────────────
     req.user = {
       id: user.id,
       employeeCode: user.employee_code,
@@ -119,9 +103,6 @@ async function authenticate(req, res, next) {
   }
 }
 
-/**
- * Optional auth middleware — attaches user if token present, doesn't block.
- */
 async function optionalAuth(req, res, next) {
   const authHeader = req.headers.authorization;
 

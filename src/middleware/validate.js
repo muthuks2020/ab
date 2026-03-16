@@ -1,8 +1,5 @@
 'use strict';
-/**
- * validate.js — Joi validation middleware
- * @version 2.0.0
- */
+
 const { errorResponse } = require('../utils/helpers');
 
 const validateBody = (schema) => (req, res, next) => {

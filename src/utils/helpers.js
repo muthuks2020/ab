@@ -1,8 +1,3 @@
-/**
- * helpers.js — Shared Utility Functions
- * @version 2.0.0 - Migrated to aop schema (v5). formatCommitment updated for product_master JOINs.
- */
-
 const MONTHS = ['apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec', 'jan', 'feb', 'mar'];
 
 const successResponse = (data, message = 'Success') => ({
@@ -37,19 +32,14 @@ const calcGrowth = (lyValue, cyValue) => {
   return Math.round(((cyValue - lyValue) / lyValue) * 100 * 10) / 10;
 };
 
-/**
- * Format a ts_product_commitments row for API response.
- * In v5, product_name/employee_name/unit are NO LONGER columns on ts_product_commitments.
- * They come from JOINs to product_master / ts_auth_users.
- */
 const formatCommitment = (row) => ({
   id: row.id,
   fiscalYearCode: row.fiscal_year_code,
   employeeCode: row.employee_code,
-  employeeName: row.employee_name || row.full_name || null,       // from JOIN to ts_auth_users
-  employeeRole: row.employee_role || row.role || null,             // from JOIN to ts_auth_users
+  employeeName: row.employee_name || row.full_name || null,
+  employeeRole: row.employee_role || row.role || null,
   productCode: row.product_code,
-  productName: row.product_name || null,                           // from JOIN to product_master
+  productName: row.product_name || null,
   categoryId: row.category_id || row.product_category || null,
   unit: row.unit || null,
   zoneCode: row.zone_code,
@@ -66,16 +56,13 @@ const formatCommitment = (row) => ({
   approvedByName: row.approved_by_name,
   createdAt: row.created_at,
   updatedAt: row.updated_at,
-  // NEW v5: product details from JOIN (available when JOINed)
+
   unitCost: row.unit_cost ? parseFloat(row.unit_cost) : null,
   productCategory: row.product_category || null,
   productFamily: row.product_family || null,
   productSubgroup: row.product_subgroup || null,
 });
 
-/**
- * Format a ts_auth_users row for API response.
- */
 const formatUser = (row) => ({
   id: row.id,
   employeeCode: row.employee_code,
@@ -93,7 +80,7 @@ const formatUser = (row) => ({
   territoryName: row.territory_name,
   reportsTo: row.reports_to,
   isActive: row.is_active,
-  isVacant: row.is_vacant || false,   // NEW in v5
+  isVacant: row.is_vacant || false,
 });
 
 module.exports = {

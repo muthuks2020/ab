@@ -1,17 +1,9 @@
-/**
- * geography.service.js — Geography Targets Service (NEW in v5)
- * Manages zone/area/territory level targets in ts_geography_targets.
- */
-
 'use strict';
 
 const { db } = require('../config/database');
 
 const GeographyService = {
 
-  /**
-   * Get geography targets by level and code
-   */
   async getGeographyTargets(geoLevel, geoCode, fiscalYear) {
     const rows = await db('ts_geography_targets AS gt')
       .join('product_master AS pm', 'pm.productcode', 'gt.product_code')
@@ -45,13 +37,9 @@ const GeographyService = {
     }));
   },
 
-  /**
-   * Set/update geography targets
-   */
   async setGeographyTargets(geoLevel, geoCode, geoName, fiscalYear, targets, actorCode) {
     const now = new Date();
 
-    // Resolve geo fields based on level
     const geoFields = {};
     if (geoLevel === 'zone') {
       geoFields.zone_code = geoCode;
@@ -108,9 +96,6 @@ const GeographyService = {
     return { success: true, savedCount };
   },
 
-  /**
-   * Get geography coverage from view
-   */
   async getGeographyCoverage() {
     const rows = await db('ts_v_geography_coverage').select('*');
     return rows;

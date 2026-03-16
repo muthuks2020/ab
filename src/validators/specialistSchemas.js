@@ -1,8 +1,5 @@
 'use strict';
-/**
- * specialistSchemas.js — Joi schemas for specialist + ABM-specialist routes
- * @version 2.0.0 — productCode instead of productId
- */
+
 const Joi = require('joi');
 
 const monthlyTargetsSchema = Joi.object().pattern(

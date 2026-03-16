@@ -1,23 +1,7 @@
-/**
- * common.service.js — Shared Service (Categories, Products, Fiscal Years, Org Hierarchy)
- * @version 2.2.0 - Fixed getCategories():
- *   1. Replaced db.raw() in JOIN (fails locally) with getKnex().raw()
- *   2. ts_role_product_access.category_id values don't match ts_product_categories.id
- *      (access table has 'PMMA','Diagnostic & laser' etc; categories table has 'equipment','iol')
- *      So role filtering via JOIN is unreliable — return all active categories for any logged-in role.
- *      All 4 categories (equipment, iol, consumable-sales, msi) are valid for TBM.
- */
-
 const { db, getKnex } = require('../config/database');
 
 const CommonService = {
 
-  /**
-   * GET /categories — returns all active product categories
-   * Role-based filtering removed: ts_role_product_access category_id values
-   * don't match ts_product_categories id values so the JOIN was always broken.
-   * All active categories are returned for any authenticated user.
-   */
   async getCategories(userRole) {
     const rows = await db('ts_product_categories AS c')
       .where('c.is_active', true)
@@ -34,17 +18,14 @@ const CommonService = {
     }));
   },
 
-  /**
-   * GET /products — reads from aop.product_master
-   */
   async getProducts(categoryId) {
     let query = db('product_master')
       .select(
         'productcode AS product_code',
-        'product_subgroup AS product_name',   // human-readable name (product_name col is SF ID)
+        'product_subgroup AS product_name',
         'product_category AS category_id',
-        'product_family AS subcategory',       // e.g. "Diagnostic", "Surgical", "Monofocal"
-        'product_group AS subgroup',           // sub-grouping within subcategory
+        'product_family AS subcategory',
+        'product_group AS subgroup',
         'quota_price__c AS unit_cost',
         'isactive'
       )
@@ -72,9 +53,6 @@ const CommonService = {
     }));
   },
 
-  /**
-   * GET /product-pricing — reads from aop.product_master
-   */
   async getProductPricing(categoryId) {
     let query = db('product_master')
       .select(
@@ -103,9 +81,6 @@ const CommonService = {
     }));
   },
 
-  /**
-   * GET /fiscal-years
-   */
   async getFiscalYears() {
     const rows = await db('ts_fiscal_years')
       .select('id', 'code', 'label', 'start_date', 'end_date', 'is_active', 'is_commitment_open', 'commitment_deadline')
@@ -123,9 +98,6 @@ const CommonService = {
     }));
   },
 
-  /**
-   * GET /aop-targets
-   */
   async getAopTargets(userId, fiscalYear) {
     try {
       const rows = await getKnex().raw(
@@ -139,9 +111,6 @@ const CommonService = {
     }
   },
 
-  /**
-   * GET /org-hierarchy — from ts_v_org_hierarchy view
-   */
   async getOrgHierarchy() {
     const rows = await db('ts_v_org_hierarchy').select('*');
 
@@ -164,9 +133,6 @@ const CommonService = {
     }));
   },
 
-  /**
-   * Get active fiscal year
-   */
   async getActiveFiscalYear() {
     return db('ts_fiscal_years').where('is_active', true).first();
   },

@@ -11,6 +11,9 @@ module.exports = {
   async deleteUser(req, res, next) { try { res.json(await AdminService.deleteUser(parseInt(req.params.id))); } catch (err) { if (err.status) return res.status(err.status).json(errorResponse(err.message)); next(err); } },
   async toggleUserStatus(req, res, next) { try { res.json(await AdminService.toggleUserStatus(parseInt(req.params.id))); } catch (err) { if (err.status) return res.status(err.status).json(errorResponse(err.message)); next(err); } },
 
+  // ← Phase 2 addition: admin resets a user's password to their employee code
+  async resetPassword(req, res, next) { try { res.json(await AdminService.resetPassword(parseInt(req.params.id))); } catch (err) { if (err.status) return res.status(err.status).json(errorResponse(err.message)); next(err); } },
+
   async transferEmployee(req, res, next) { try { res.json(await AdminService.transferEmployee(req.body.employeeCode, req.body.newGeo || req.body, req.user.employeeCode, req.body.reason)); } catch (err) { if (err.status) return res.status(err.status).json(errorResponse(err.message)); next(err); } },
   async getTransferHistory(req, res, next) { try { res.json(await AdminService.getTransferHistory(req.query.employeeCode)); } catch (err) { next(err); } },
 

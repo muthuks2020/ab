@@ -24,13 +24,18 @@ const AdminService = {
       territoryCode: r.territory_code, territoryName: r.territory_name, reportsTo: r.reports_to,
       isActive: r.is_active, isVacant: r.is_vacant || false, lastLoginAt: r.last_login_at,
       authProvider: r.auth_provider, createdAt: r.created_at,
+      mustChangePassword: r.must_change_password || false,  // ← Phase 2 addition
     }));
   },
 
   async createUser(data) {
     const existing = await db('ts_auth_users').where('employee_code', data.employeeCode).first();
     if (existing) throw Object.assign(new Error('Employee code already exists.'), { status: 409 });
-    const hash = data.password ? await bcrypt.hash(data.password, 10) : await bcrypt.hash('demo123', 10);
+
+    // ← Phase 2: default password = employee code, must change on first login
+    const defaultPassword = data.employeeCode;
+    const hash = await bcrypt.hash(defaultPassword, 10);
+
     const [user] = await db('ts_auth_users').insert({
       employee_code: data.employeeCode, username: data.username || data.employeeCode.toLowerCase(),
       password_hash: hash, full_name: data.fullName, email: data.email, phone: data.phone,
@@ -39,6 +44,7 @@ const AdminService = {
       area_code: data.areaCode, area_name: data.areaName,
       territory_code: data.territoryCode, territory_name: data.territoryName,
       reports_to: data.reportsTo, is_active: true, is_vacant: false, auth_provider: 'local',
+      must_change_password: true,  // ← Phase 2: always forced on new users
     }).returning('*');
     return { success: true, user: { id: user.id, employeeCode: user.employee_code, fullName: user.full_name } };
   },
@@ -79,6 +85,30 @@ const AdminService = {
     if (!user) throw Object.assign(new Error('User not found.'), { status: 404 });
     await db('ts_auth_users').where({ id: userId }).update({ is_active: !user.is_active, updated_at: new Date() });
     return { success: true, isActive: !user.is_active };
+  },
+
+  // ← Phase 2 addition: admin resets a user's password back to their employee code
+  // Sets must_change_password = true so user is forced to change on next login
+  async resetPassword(userId) {
+    const user = await db('ts_auth_users').where({ id: userId }).first();
+    if (!user) throw Object.assign(new Error('User not found.'), { status: 404 });
+
+    const tempPassword = user.employee_code;   // reset to employee code
+    const hash = await bcrypt.hash(tempPassword, 10);
+
+    await db('ts_auth_users').where({ id: userId }).update({
+      password_hash        : hash,
+      must_change_password : true,
+      updated_at           : new Date(),
+    });
+
+    console.log(`[Admin] Password reset for: ${user.employee_code} (${user.email})`);
+
+    return {
+      success      : true,
+      message      : `Password reset to employee code. User must change password on next login.`,
+      employeeCode : user.employee_code,
+    };
   },
 
   async transferEmployee(employeeCode, newGeo, transferredBy, reason) {

@@ -14,6 +14,7 @@ router.post('/users', AdminController.createUser);
 router.put('/users/:id', AdminController.updateUser);
 router.delete('/users/:id', AdminController.deleteUser);
 router.put('/users/:id/toggle-status', AdminController.toggleUserStatus);
+router.put('/users/:id/reset-password', AdminController.resetPassword);  // ← Phase 2 addition
 
 router.get('/products', AdminController.getProducts);
 router.post('/products', AdminController.createProduct);

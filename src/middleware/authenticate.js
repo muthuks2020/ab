@@ -1,4 +1,7 @@
-const db = require('../config/database');
+const jwt = require('jsonwebtoken');
+const db  = require('../config/database');
+
+const JWT_SECRET = process.env.JWT_SECRET || 'appasamy-target-setting-jwt-secret-change-me';
 
 const ROLE_MAP = {
   'sales_rep'                         : 'sales_rep',
@@ -35,7 +38,7 @@ const ROLE_MAP = {
   'sales head (surgical)'             : 'sales_head',
   'sales head (diagnostic)'           : 'sales_head',
   'equipment specialist - surgical systems'  : 'sales_rep',
-'equipment specialist- surgical systems'   : 'sales_rep',
+  'equipment specialist- surgical systems'   : 'sales_rep',
   'at_iol_specialist'                 : 'at_iol_specialist',
   'at iol specialist'                 : 'at_iol_specialist',
   'iol specialist'                    : 'at_iol_specialist',
@@ -75,7 +78,7 @@ const ROLE_MAP = {
 
 function normalizeRole(rawRole) {
   if (!rawRole) return null;
-  const key = rawRole.trim().toLowerCase();
+  const key    = rawRole.trim().toLowerCase();
   const mapped = ROLE_MAP[key];
   if (!mapped) {
     console.warn(`[Auth] Unknown role in DB: "${rawRole}" — access will be denied`);
@@ -105,20 +108,9 @@ function getDemoUser(req) {
   return DEMO_USERS[role] || DEMO_USERS.sales_rep;
 }
 
-function decodeToken(token) {
-  try {
-    const decoded = Buffer.from(token, 'base64').toString('utf8');
-    const userId  = parseInt(decoded, 10);
-    if (isNaN(userId)) return null;
-    return userId;
-  } catch {
-    return null;
-  }
-}
-
 async function authenticate(req, res, next) {
   try {
-
+    // ── Demo mode bypass ────────────────────────────────────────────────────
     if (DEMO_MODE) {
       req.user = getDemoUser(req);
       return next();
@@ -129,13 +121,25 @@ async function authenticate(req, res, next) {
       return res.status(401).json({ success: false, message: 'Access denied. No token provided.' });
     }
 
-    const token  = authHeader.split(' ')[1];
-    const userId = decodeToken(token);
+    const token = authHeader.split(' ')[1];
 
-    if (!userId) {
+    // ── Verify JWT (replaces old base64 decodeToken) ────────────────────────
+    let decoded;
+    try {
+      decoded = jwt.verify(token, JWT_SECRET);
+    } catch (jwtErr) {
+      if (jwtErr.name === 'TokenExpiredError') {
+        return res.status(401).json({ success: false, message: 'Session expired. Please log in again.', code: 'TOKEN_EXPIRED' });
+      }
       return res.status(401).json({ success: false, message: 'Invalid token.' });
     }
 
+    const userId = decoded.userId;
+    if (!userId) {
+      return res.status(401).json({ success: false, message: 'Invalid token payload.' });
+    }
+
+    // ── Load fresh user from DB ─────────────────────────────────────────────
     const knex = db.getKnex();
     const user = await knex('aop.ts_auth_users')
       .where('id', userId)

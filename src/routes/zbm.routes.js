@@ -20,7 +20,9 @@ router.get('/team-members', ZBMController.getTeamMembers);
 router.get('/abm-hierarchy', ZBMController.getAbmHierarchy);
 router.get('/team-yearly-targets', ZBMController.getTeamYearlyTargets);
 router.post('/team-yearly-targets/save', ZBMController.saveTeamYearlyTargets);
+router.post('/team-yearly-targets/publish', ZBMController.publishTeamYearlyTargets);
 router.get('/unique-abms', ZBMController.getUniqueAbms);
 
+router.get('/sh-assigned-target', ZBMController.getSHAssignedTarget);
 router.get('/dashboard-stats', ZBMController.getDashboardStats);
 module.exports = router;

@@ -4,11 +4,7 @@ const { formatCommitment, aggregateMonthlyTargets, calcGrowth } = require('../ut
 function normalizeFY(fyCode) {
   if (!fyCode) return fyCode;
   if (/^FY\d{2}_\d{2}$/.test(fyCode)) return fyCode;
-  if (/^\d{4}$/.test(String(fyCode))) {
-    const yr = parseInt(fyCode);
-    return `FY${String(yr - 1).slice(-2)}_${String(yr).slice(-2)}`;
-  }
-  const m = String(fyCode).match(/(\d{4})-(\d{2})/);
+  const m = fyCode.match(/(\d{4})-(\d{2})/);
   if (m) return `FY${String(m[1]).slice(-2)}_${m[2]}`;
   return fyCode;
 }
@@ -328,18 +324,9 @@ const TBMService = {
       });
     }
 
-    // Fetch TBM's own yearly target assigned by ABM
-    const ownAssignment = await db('ts_yearly_target_assignments')
-      .where({ assignee_code: tbmEmployeeCode, fiscal_year_code: 'FY26_27' })
-      .first();
-    const cyTargetValue = ownAssignment ? parseFloat(ownAssignment.cy_target_value) || 0 : 0;
-
-    return {
-      products: Object.values(productMap).sort((a, b) =>
-        a.categoryId.localeCompare(b.categoryId) || a.name.localeCompare(b.name)
-      ),
-      cyTargetValue,
-    };
+    return Object.values(productMap).sort((a, b) =>
+      a.categoryId.localeCompare(b.categoryId) || a.name.localeCompare(b.name)
+    );
   },
 
   async saveTerritoryTargets(targets, tbmUser) {

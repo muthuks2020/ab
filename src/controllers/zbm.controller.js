@@ -12,6 +12,8 @@ module.exports = {
   async getTeamMembers(req, res, next) { try { res.json(await ZBMService.getTeamMembers(req.user.employeeCode)); } catch (err) { next(err); } },
   async getTeamYearlyTargets(req, res, next) { try { res.json(await ZBMService.getTeamYearlyTargets(req.user.employeeCode, req.query.fy)); } catch (err) { next(err); } },
   async saveTeamYearlyTargets(req, res, next) { try { res.json(await ZBMService.saveTeamYearlyTargets(req.body.targets, req.user, req.body.fiscalYear)); } catch (err) { if (err.status) return res.status(err.status).json(errorResponse(err.message)); next(err); } },
+  async publishTeamYearlyTargets(req, res, next) { try { res.json(await ZBMService.publishTeamYearlyTargets(req.body.memberIds, req.user, req.body.fiscalYear)); } catch (err) { if (err.status) return res.status(err.status).json(errorResponse(err.message)); next(err); } },
+  async getSHAssignedTarget(req, res, next) { try { res.json(await ZBMService.getSHAssignedTarget(req.user.employeeCode)); } catch (err) { next(err); } },
   async getDashboardStats(req, res, next) { try { res.json(await ZBMService.getDashboardStats(req.user.employeeCode)); } catch (err) { next(err); } },
   async getUniqueAbms(req, res, next) { try { res.json(await ZBMService.getUniqueAbms(req.user.employeeCode)); } catch (err) { next(err); } },
 };

@@ -4,11 +4,7 @@ const { formatCommitment, aggregateMonthlyTargets, calcGrowth } = require('../ut
 function normalizeFY(fyCode) {
   if (!fyCode) return fyCode;
   if (/^FY\d{2}_\d{2}$/.test(fyCode)) return fyCode;
-  if (/^\d{4}$/.test(String(fyCode))) {
-    const yr = parseInt(fyCode);
-    return `FY${String(yr - 1).slice(-2)}_${String(yr).slice(-2)}`;
-  }
-  const m = String(fyCode).match(/(\d{4})-(\d{2})/);
+  const m = fyCode.match(/(\d{4})-(\d{2})/);
   if (m) return `FY${String(m[1]).slice(-2)}_${m[2]}`;
   return fyCode;
 }

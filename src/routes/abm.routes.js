@@ -23,6 +23,7 @@ router.get('/team-members', ABMController.getTeamMembers);
 router.get('/tbm-hierarchy', ABMController.getTbmHierarchy);
 router.get('/team-yearly-targets', ABMController.getTeamYearlyTargets);
 router.post('/team-yearly-targets/save', ABMController.saveTeamYearlyTargets);
+router.post('/team-yearly-targets/publish', ABMController.publishTeamYearlyTargets);
 router.get('/unique-tbms', ABMController.getUniqueTbms);
 
 router.get('/dashboard-stats', ABMController.getDashboardStats);

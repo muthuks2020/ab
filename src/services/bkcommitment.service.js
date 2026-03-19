@@ -21,7 +21,8 @@ const CommitmentService = {
   },
 
   async getProducts(employeeCode, fiscalYearCode) {
-    const activeFy = fiscalYearCode || 'FY26_27';
+    const activeFy = fiscalYearCode
+      || (await db('ts_fiscal_years').where('is_active', true).first())?.code;
 
     const pmSubquery = db('product_master')
       .distinctOn('productcode')
@@ -173,10 +174,13 @@ const CommitmentService = {
 
   async getDashboardSummary(employeeCode) {
 
-    // CY is always FY26_27, LY is always FY25_26 — fixed, never derived dynamically
-    const cyFyCode = 'FY26_27';
-    const lyFyCode = 'FY25_26';
-    const cyFyLabel = '26-27';
+    // CY is always FY26_27 (active FY), LY is always FY25_26 — fixed, never derived dynamically
+    const activeFy = await db('ts_fiscal_years').where('is_active', true).first();
+    if (!activeFy) return null;
+
+    const cyFyCode = activeFy.code;                                               // FY26_27
+    const lyFyCode = 'FY25_26';                                                   // always fixed
+    const cyFyLabel = activeFy.label || cyFyCode.replace('FY', '').replace('_', '-'); // "26-27"
 
     const commitments = await db('ts_product_commitments')
       .where({ employee_code: employeeCode, fiscal_year_code: cyFyCode });
@@ -206,19 +210,9 @@ const CommitmentService = {
       ? parseFloat(cyAssignRow.total)
       : 0;
 
-    // LY achieved value — from ly_achieved_value column in FY26_27 assignment rows
-    const lyAchRow = await db('ts_yearly_target_assignments')
-      .where({ assignee_code: employeeCode, fiscal_year_code: cyFyCode })
-      .sum('ly_achieved_value as total')
-      .first();
-    const lyAchieved = (lyAchRow?.total && parseFloat(lyAchRow.total) > 0)
-      ? parseFloat(lyAchRow.total)
-      : 0;
-
     return {
       ...totals,
       lyRev,
-      lyAchieved,
       targetValue,
       qtyGrowth: calcGrowth(totals.lyQty, totals.cyQty),
       revGrowth: calcGrowth(targetValue, totals.cyRev),
@@ -232,7 +226,7 @@ const CommitmentService = {
   },
 
   async getQuarterlySummary(employeeCode, fiscalYearCode) {
-    const fy = fiscalYearCode || 'FY26_27';
+    const fy = fiscalYearCode || (await db('ts_fiscal_years').where('is_active', true).first())?.code;
     if (!fy) return { categories: [] };
 
     const commitments = await db('ts_product_commitments')
@@ -276,8 +270,11 @@ const CommitmentService = {
   },
 
   async getCategoryPerformance(employeeCode) {
+    const activeFy = await db('ts_fiscal_years').where('is_active', true).first();
+    if (!activeFy) return [];
+
     const commitments = await db('ts_product_commitments')
-      .where({ employee_code: employeeCode, fiscal_year_code: 'FY26_27' });
+      .where({ employee_code: employeeCode, fiscal_year_code: activeFy.code });
 
     const byCategory = {};
     let totalCyRev = 0;

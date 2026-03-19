@@ -11,7 +11,6 @@ const getActiveFY = async () => {
 const getSpecialistCodes = async (abmEmployeeCode) => {
   const rows = await db('ts_auth_users')
     .where({ reports_to: abmEmployeeCode, is_active: true })
-    .whereIn('role', SPECIALIST_ROLES)
     .select('employee_code');
   return rows.map((r) => r.employee_code);
 };
@@ -191,7 +190,6 @@ const bulkApproveSpecialist = async (submissionIds, abmUser) => {
 const getSpecialists = async (abmEmployeeCode) => {
   const rows = await db('ts_auth_users')
     .where({ reports_to: abmEmployeeCode, is_active: true })
-    .whereIn('role', SPECIALIST_ROLES)
     .orderBy('full_name');
 
   return rows.map((r) => ({
@@ -211,10 +209,49 @@ const getSpecialists = async (abmEmployeeCode) => {
 const getSpecialistYearlyTargets = async (abmEmployeeCode, fiscalYearCode) => {
   const fy = fiscalYearCode || await getActiveFY();
 
+  // LY is always FY25_26, CY is always FY26_27
+  const prevFy = 'FY25_26';
+
+  // Sum target_revenue + target_quantity from ts_product_commitments for FY25_26
+  const fetchLyTotals = async (employeeCodes) => {
+    if (!employeeCodes.length) return {};
+    const lyRows = await db('ts_product_commitments')
+      .whereIn('employee_code', employeeCodes)
+      .where({ fiscal_year_code: prevFy })
+      .groupBy('employee_code')
+      .select('employee_code')
+      .sum({ lyTargetValue: 'target_revenue', lyTargetQty: 'target_quantity' });
+    const map = {};
+    lyRows.forEach((r) => {
+      map[r.employee_code] = {
+        lyTargetValue: parseFloat(r.lyTargetValue || 0),
+        lyTargetQty:   parseFloat(r.lyTargetQty   || 0),
+      };
+    });
+    return map;
+  };
+
+  const fetchLyAchieved = async (employeeCodes) => {
+    if (!employeeCodes.length) return {};
+    const lyRows = await db('ts_yearly_target_assignments')
+      .whereIn('assignee_code', employeeCodes)
+      .where({ fiscal_year_code: prevFy })
+      .groupBy('assignee_code')
+      .select('assignee_code')
+      .sum({ lyAchievedValue: 'ly_achieved_value', lyAchievedQty: 'ly_achieved_qty' });
+    const map = {};
+    lyRows.forEach((r) => {
+      map[r.assignee_code] = {
+        lyAchievedValue: parseFloat(r.lyAchievedValue || 0),
+        lyAchievedQty:   parseFloat(r.lyAchievedQty   || 0),
+      };
+    });
+    return map;
+  };
+
   const rows = await db('ts_yearly_target_assignments AS yta')
     .leftJoin('ts_auth_users AS u', 'u.employee_code', 'yta.assignee_code')
     .where({ 'yta.manager_code': abmEmployeeCode, 'yta.fiscal_year_code': fy })
-    .whereIn('yta.assignee_role', SPECIALIST_ROLES)
     .select(
       'yta.*',
       'u.full_name AS assignee_name',
@@ -222,45 +259,68 @@ const getSpecialistYearlyTargets = async (abmEmployeeCode, fiscalYearCode) => {
     )
     .orderBy('u.full_name');
 
+  // Fallback: no FY26_27 assignments yet — seed from direct reports + look up LY from FY25_26
   if (rows.length === 0) {
     const specialists = await db('ts_auth_users')
       .where({ reports_to: abmEmployeeCode, is_active: true })
-      .whereIn('role', SPECIALIST_ROLES)
       .orderBy('full_name');
 
-    return specialists.map((s) => ({
-      id: null,
-      fiscalYearCode: fy,
-      assigneeCode: s.employee_code,
-      assigneeName: s.full_name,
-      assigneeRole: s.role,
-      assigneeTerritory: s.area_name || s.territory_name || '',
-      lyTargetQty: 0, lyAchievedQty: 0,
-      lyTargetValue: 0, lyAchievedValue: 0,
-      cyTargetQty: 0, cyTargetValue: 0,
-      categoryBreakdown: [],
-      status: 'not_set',
-      publishedAt: null,
-    }));
+    const specialistCodeList = specialists.map((s) => s.employee_code);
+    const lyMap = await fetchLyTotals(specialistCodeList);
+    const lyAchievedMap = await fetchLyAchieved(specialistCodeList);
+
+    return specialists.map((s) => {
+      const ly = lyMap[s.employee_code] || {};
+      const lyAch = lyAchievedMap[s.employee_code] || {};
+      return {
+        id: null,
+        fiscalYearCode: fy,
+        assigneeCode: s.employee_code,
+        assigneeName: s.full_name,
+        assigneeRole: s.role,
+        assigneeTerritory: s.area_name || s.territory_name || '',
+        lyTargetQty:     ly.lyTargetQty         || 0,
+        lyAchievedQty:   lyAch.lyAchievedQty    || 0,
+        lyTargetValue:   ly.lyTargetValue        || 0,
+        lyAchievedValue: lyAch.lyAchievedValue   || 0,
+        cyTargetQty: 0, cyTargetValue: 0,
+        categoryBreakdown: [],
+        status: 'not_set',
+        publishedAt: null,
+      };
+    });
   }
 
-  return rows.map((r) => ({
-    id: r.id,
-    fiscalYearCode: r.fiscal_year_code,
-    assigneeCode: r.assignee_code,
-    assigneeName: r.assignee_name || r.assignee_code,
-    assigneeRole: r.assignee_role,
-    assigneeTerritory: r.assignee_territory || r.area_name || '',
-    lyTargetQty: parseFloat(r.ly_target_qty || 0),
-    lyAchievedQty: parseFloat(r.ly_achieved_qty || 0),
-    lyTargetValue: parseFloat(r.ly_target_value || 0),
-    lyAchievedValue: parseFloat(r.ly_achieved_value || 0),
-    cyTargetQty: parseFloat(r.cy_target_qty || 0),
-    cyTargetValue: parseFloat(r.cy_target_value || 0),
-    categoryBreakdown: r.category_breakdown || [],
-    status: r.status,
-    publishedAt: r.published_at,
-  }));
+  // Main path: rows exist — backfill LY from FY25_26 when columns are zero
+  const assigneeCodes = rows.map((r) => r.assignee_code);
+  const lyMap         = await fetchLyTotals(assigneeCodes);
+  const lyAchievedMap = await fetchLyAchieved(assigneeCodes);
+
+  return rows.map((r) => {
+    const ly    = lyMap[r.assignee_code]         || {};
+    const lyAch = lyAchievedMap[r.assignee_code] || {};
+    const lyTargetValue   = parseFloat(r.ly_target_value   || 0) || ly.lyTargetValue    || 0;
+    const lyTargetQty     = parseFloat(r.ly_target_qty     || 0) || ly.lyTargetQty      || 0;
+    const lyAchievedValue = parseFloat(r.ly_achieved_value || 0) || lyAch.lyAchievedValue || 0;
+    const lyAchievedQty   = parseFloat(r.ly_achieved_qty   || 0) || lyAch.lyAchievedQty   || 0;
+    return {
+      id: r.id,
+      fiscalYearCode: r.fiscal_year_code,
+      assigneeCode: r.assignee_code,
+      assigneeName: r.assignee_name || r.assignee_code,
+      assigneeRole: r.assignee_role,
+      assigneeTerritory: r.assignee_territory || r.area_name || '',
+      lyTargetQty,
+      lyAchievedQty,
+      lyTargetValue,
+      lyAchievedValue,
+      cyTargetQty:     parseFloat(r.cy_target_qty   || 0),
+      cyTargetValue:   parseFloat(r.cy_target_value || 0),
+      categoryBreakdown: r.category_breakdown || [],
+      status: r.status,
+      publishedAt: r.published_at,
+    };
+  });
 };
 
 const saveSpecialistYearlyTargets = async (targets, abmUser, fiscalYearCode) => {

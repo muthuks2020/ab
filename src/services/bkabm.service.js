@@ -8,14 +8,6 @@ const getActiveFY = async () => {
   return fy?.code || 'FY26_27';
 };
 
-const normalizeFY = (fy) => {
-  if (!fy) return null;
-  if (fy.startsWith('FY')) return fy;          // already 'FY26_27'
-  const [a, b] = fy.split('-');                // '2026-27' → ['2026','27']
-  if (!a || !b) return fy;
-  return 'FY' + a.slice(-2) + '_' + b.slice(-2); // → 'FY26_27'
-};
-
 async function getAbmDirectReports(abmEmployeeCode) {
   const reports = await db('ts_auth_users')
     .where({ reports_to: abmEmployeeCode, is_active: true })
@@ -268,167 +260,32 @@ const ABMService = {
   },
 
   async getTeamYearlyTargets(abmEmployeeCode, fiscalYear) {
-    const fy = normalizeFY(fiscalYear) || await getActiveFY();
+    const fy = fiscalYear || await getActiveFY();
     const directReports = await getAbmDirectReports(abmEmployeeCode);
-
-    // LY is always FY25_26, CY is always FY26_27
-    const prevFy = 'FY25_26';
-
-    const tbmDirectReports = directReports;
-    const tbmCodes = tbmDirectReports.map((r) => r.employee_code);
-
-    // CY assignments saved by this ABM for current FY
-    const cyAssignments = await db('ts_yearly_target_assignments')
-      .where({ manager_code: abmEmployeeCode, fiscal_year_code: fy })
-      .select('assignee_code', 'cy_target_value', 'ly_target_value', 'ly_achieved_value', 'category_name', 'status');
-
-    // Prev FY rows for LY fallback — query by assignee_code since manager_code is NULL on imported rows
-    const lyAssignments = tbmCodes.length > 0
-      ? await db('ts_yearly_target_assignments')
-          .whereIn('assignee_code', tbmCodes)
-          .where({ fiscal_year_code: prevFy })
-          .select('assignee_code', 'cy_target_value', 'ly_achieved_value', 'category_name')
-      : [];
-
-    // Final fallback: sum target_revenue from ts_product_commitments for FY25_26 per TBM
-    const lyCommitRows = tbmCodes.length > 0
-      ? await db('ts_product_commitments')
-          .whereIn('employee_code', tbmCodes)
-          .where({ fiscal_year_code: prevFy })
-          .groupBy('employee_code')
-          .select('employee_code')
-          .sum({ lyTargetValue: 'target_revenue', lyTargetQty: 'target_quantity' })
-      : [];
-    const lyCommitMap = {};
-    lyCommitRows.forEach((r) => {
-      lyCommitMap[r.employee_code] = parseFloat(r.lyTargetValue || 0);
-    });
-
-    const members = tbmDirectReports.map((r) => {
-      const cyRows = cyAssignments.filter((a) => a.assignee_code === r.employee_code);
-      const lyRows = lyAssignments.filter((a) => a.assignee_code === r.employee_code);
-
-      // Aggregate LY from cy rows first (they carry ly_target_value / ly_achieved_value)
-      // Fall back to prev-FY cy_target_value, then to ts_product_commitments FY25_26 data
-      const lyTargetValue =
-        cyRows.reduce((s, a) => s + parseFloat(a.ly_target_value || 0), 0) ||
-        lyRows.reduce((s, a) => s + parseFloat(a.cy_target_value || 0), 0) ||
-        lyCommitMap[r.employee_code] || 0;
-      const lyAchievedValue =
-        cyRows.reduce((s, a) => s + parseFloat(a.ly_achieved_value || 0), 0) ||
-        lyRows.reduce((s, a) => s + parseFloat(a.ly_achieved_value || 0), 0);
-      const cyTargetValue   = cyRows.reduce((s, a) => s + parseFloat(a.cy_target_value   || 0), 0);
-
-      // Derive status
-      const statuses = cyRows.map((a) => a.status).filter(Boolean);
-      const status = statuses.length === 0 ? 'not_set'
-        : statuses.every((s) => s === 'published') ? 'published' : 'draft';
-
-      // Build category breakdown from CY rows
-      const catMap = {};
-      cyRows.forEach((a) => {
-        const cat = a.category_name || 'Other';
-        if (!catMap[cat]) catMap[cat] = { lyTargetValue: 0, lyAchievedValue: 0, cyTargetValue: 0 };
-        catMap[cat].lyTargetValue  += parseFloat(a.ly_target_value   || 0);
-        catMap[cat].lyAchievedValue += parseFloat(a.ly_achieved_value || 0);
-        catMap[cat].cyTargetValue  += parseFloat(a.cy_target_value   || 0);
-      });
-      // Fallback: populate LY from prev-FY rows when no CY rows exist yet
-      if (cyRows.length === 0) {
-        lyRows.forEach((a) => {
-          const cat = a.category_name || 'Other';
-          if (!catMap[cat]) catMap[cat] = { lyTargetValue: 0, lyAchievedValue: 0, cyTargetValue: 0 };
-          catMap[cat].lyTargetValue += parseFloat(a.cy_target_value || 0);
-        });
-      }
-
-      const categoryBreakdown = Object.entries(catMap).map(([name, vals]) => ({
-        id:              name.toLowerCase().replace(/[\s-]+/g, '-'),
-        name,
-        lyTargetValue:   vals.lyTargetValue,
-        lyAchievedValue: vals.lyAchievedValue,
-        lyTarget:        0,
-        lyAchieved:      0,
-        cyTargetValue:   vals.cyTargetValue,
-        cyTarget:        0,
-      }));
-
-      return {
-        employeeCode:    r.employee_code,
-        fullName:        r.full_name,
-        territory:       r.territory_name || r.area_name || '',
-        designation:     r.designation    || 'Territory Business Manager',
-        lyTargetValue,
-        lyAchievedValue,
-        lyTarget:        0,
-        lyAchieved:      0,
-        cyTargetValue,
-        cyTarget:        0,
-        status,
-        lastUpdated:     null,
-        categoryBreakdown,
-      };
+    const assignments = await db('ts_yearly_target_assignments AS yta').leftJoin('ts_auth_users AS u', 'u.employee_code', 'yta.assignee_code')
+      .where('yta.manager_code', abmEmployeeCode).where('yta.fiscal_year_code', fy)
+      .select('yta.*', 'u.full_name AS assignee_name', 'u.territory_name');
+    const members = directReports.map((r) => {
+      const memberTargets = assignments.filter((a) => a.assignee_code === r.employee_code);
+      return { employeeCode: r.employee_code, fullName: r.full_name,
+        targets: memberTargets.map((a) => ({ id: a.id, productCode: a.product_code, categoryId: a.category_id, yearlyTarget: parseFloat(a.cy_target_value || 0), status: a.status, territory: a.territory_name })) };
     });
     return { fiscalYear: fy, members };
   },
 
   async saveTeamYearlyTargets(targets, abmUser, fiscalYear) {
-    const fy = normalizeFY(fiscalYear) || await getActiveFY();
-    const now = new Date();
-    // ts_yearly_target_assignments has no product_code column — one row per assignee.
+    const fy = fiscalYear || await getActiveFY(); const now = new Date();
     for (const t of targets) {
-      const yearlyTarget = t.yearlyTarget ?? t.cyTargetValue ?? 0;
-      const status       = t.status || 'draft';
-      const breakdown    = Array.isArray(t.categoryBreakdown) ? JSON.stringify(t.categoryBreakdown) : '[]';
-
-      const existing = await db('ts_yearly_target_assignments')
-        .where({ fiscal_year_code: fy, manager_code: abmUser.employeeCode, assignee_code: t.employeeCode })
-        .first();
-
-      const pubAt = (status === 'published') ? now : (existing ? existing.published_at : null);
-
-      if (existing) {
-        await db('ts_yearly_target_assignments')
-          .where('id', existing.id)
-          .update({
-            cy_target_value:    yearlyTarget,
-            category_breakdown: breakdown,
-            status,
-            published_at:       pubAt,
-            updated_at:         now,
-          });
-      } else {
-        await db('ts_yearly_target_assignments').insert({
-          fiscal_year_code:   fy,
-          manager_code:       abmUser.employeeCode,
-          manager_role:       abmUser.role,
-          geo_level:          'territory',
-          assignee_code:      t.employeeCode,
-          assignee_role:      'Territory Business Manager',
-          cy_target_value:    yearlyTarget,
-          category_breakdown: breakdown,
-          zone_code:          abmUser.zoneCode || abmUser.zone_code,
-          area_code:          abmUser.areaCode || abmUser.area_code,
-          territory_code:     t.territoryCode || null,
-          status,
-          published_at:       pubAt,
-          created_at:         now,
-          updated_at:         now,
-        });
-      }
+      await db('ts_yearly_target_assignments').insert({
+        fiscal_year_code: fy, manager_code: abmUser.employeeCode, manager_role: abmUser.role,
+        assignee_code: t.employeeCode, product_code: t.productCode, category_id: t.categoryId,
+        cy_target_value: t.yearlyTarget, zone_code: abmUser.zoneCode || abmUser.zone_code,
+        area_code: abmUser.areaCode || abmUser.area_code, territory_code: t.territoryCode || null,
+        status: 'draft', created_at: now, updated_at: now,
+      }).onConflict(getKnex().raw("(fiscal_year_code, manager_code, assignee_code, product_code)"))
+        .merge({ cy_target_value: t.yearlyTarget, status: 'draft', updated_at: now });
     }
     return { success: true, savedCount: targets.length };
-  },
-
-  async publishTeamYearlyTargets(memberIds, abmUser, fiscalYear) {
-    const fy = normalizeFY(fiscalYear) || await getActiveFY();
-    const now = new Date();
-    const updated = await db('ts_yearly_target_assignments')
-      .where('manager_code',     abmUser.employeeCode)
-      .where('fiscal_year_code', fy)
-      .whereIn('assignee_code',  memberIds)
-      .update({ status: 'published', published_at: now, updated_at: now });
-    return { success: true, publishedCount: updated };
   },
 
   async getUniqueTbms(abmEmployeeCode) {

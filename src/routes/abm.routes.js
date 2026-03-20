@@ -26,5 +26,9 @@ router.post('/team-yearly-targets/save', ABMController.saveTeamYearlyTargets);
 router.post('/team-yearly-targets/publish', ABMController.publishTeamYearlyTargets);
 router.get('/unique-tbms', ABMController.getUniqueTbms);
 
+router.get('/specialist-yearly-targets', ABMController.getSpecialistYearlyTargets);
+router.post('/specialist-yearly-targets/save', ABMController.saveSpecialistYearlyTargets);
+router.post('/specialist-yearly-targets/publish', ABMController.publishSpecialistYearlyTargets);
+
 router.get('/dashboard-stats', ABMController.getDashboardStats);
 module.exports = router;

@@ -159,13 +159,6 @@ const getActiveFY = async () => {
  * }
  */
 async function buildAbmDrilldown(abm, activeFy) {
-  // Fetch LY achieved value for this ABM from FY25_26 rows (assignee_code = abm)
-  const lyAchRow = await db('ts_yearly_target_assignments')
-    .where({ assignee_code: abm.employee_code, fiscal_year_code: 'FY25_26' })
-    .sum({ total: 'ly_achieved_value' })
-    .first();
-  const lyAchieved = parseFloat(lyAchRow?.total || 0);
-
   const tbmRows = await getDirectReports(abm.employee_code);
 
   const tbms = await Promise.all(
@@ -242,7 +235,6 @@ async function buildAbmDrilldown(abm, activeFy) {
     territory:   abm.area_name || '—',
     code:        abm.area_code || '',
     role:        abm.role,
-    lyAchieved,
     tbms,
   };
 }
@@ -412,59 +404,38 @@ const ZBMService = {
       .where('yta.fiscal_year_code', cyFy)
       .select('yta.*', 'u.full_name AS assignee_name', 'u.area_name');
 
-    // LY targets: query FY25_26 rows directly at ABM level first (assignee_code = abmCode).
-    // Fallback: if ABM-level rows have zero values, aggregate from TBM-level rows below.
+    // LY targets: FY25_26 rows at ABM level have ly_target_value = 0.
+    // Real data is at TBM level — query TBMs under each ABM and aggregate up.
+    // Also: FY25_26 rows have cy_target_value = 0; the target is in ly_target_value.
     const abmLyMap = {}; // abmCode → categoryName → { lyTarget, lyAchieved }
 
     if (abmCodes.length > 0) {
-      // PRIMARY: FY25_26 rows where ABM is the assignee
-      const lyAbmRows = await db('ts_yearly_target_assignments')
-        .whereIn('assignee_code', abmCodes)
-        .where({ fiscal_year_code: lyFy })
-        .select('assignee_code', 'category_name', 'ly_target_value', 'ly_achieved_value');
+      // Get all TBMs who report directly to these ABMs
+      const tbmRows = await db('ts_auth_users')
+        .whereIn('reports_to', abmCodes)
+        .where({ is_active: true })
+        .select('employee_code', 'reports_to');
 
-      for (const row of lyAbmRows) {
-        const abmCode = row.assignee_code;
-        const cat = row.category_name || 'Other';
-        if (!abmLyMap[abmCode]) abmLyMap[abmCode] = {};
-        if (!abmLyMap[abmCode][cat]) abmLyMap[abmCode][cat] = { lyTarget: 0, lyAchieved: 0 };
-        abmLyMap[abmCode][cat].lyTarget   += parseFloat(row.ly_target_value   || 0);
-        abmLyMap[abmCode][cat].lyAchieved += parseFloat(row.ly_achieved_value || 0);
-      }
+      const tbmCodes = tbmRows.map((r) => r.employee_code);
+      const tbmToAbm = {};
+      tbmRows.forEach((r) => { tbmToAbm[r.employee_code] = r.reports_to; });
 
-      // FALLBACK: for ABMs where ABM-level rows returned zero totals,
-      // aggregate from TBM-level FY25_26 rows below them.
-      const abmsWithNoData = abmCodes.filter((code) => {
-        const cats = abmLyMap[code] || {};
-        const total = Object.values(cats).reduce((s, v) => s + v.lyTarget + v.lyAchieved, 0);
-        return total === 0;
-      });
+      if (tbmCodes.length > 0) {
+        // FY25_26 TBM-level rows — manager_code may be NULL on imported rows,
+        // so query by assignee_code. Use ly_target_value (cy_target_value = 0 on FY25_26 rows).
+        const lyTbmRows = await db('ts_yearly_target_assignments')
+          .whereIn('assignee_code', tbmCodes)
+          .where({ fiscal_year_code: lyFy })
+          .select('assignee_code', 'category_name', 'ly_target_value', 'ly_achieved_value');
 
-      if (abmsWithNoData.length > 0) {
-        const tbmRows = await db('ts_auth_users')
-          .whereIn('reports_to', abmsWithNoData)
-          .where({ is_active: true })
-          .select('employee_code', 'reports_to');
-
-        const tbmCodes = tbmRows.map((r) => r.employee_code);
-        const tbmToAbm = {};
-        tbmRows.forEach((r) => { tbmToAbm[r.employee_code] = r.reports_to; });
-
-        if (tbmCodes.length > 0) {
-          const lyTbmRows = await db('ts_yearly_target_assignments')
-            .whereIn('assignee_code', tbmCodes)
-            .where({ fiscal_year_code: lyFy })
-            .select('assignee_code', 'category_name', 'ly_target_value', 'ly_achieved_value');
-
-          for (const row of lyTbmRows) {
-            const abmCode = tbmToAbm[row.assignee_code];
-            if (!abmCode) continue;
-            const cat = row.category_name || 'Other';
-            if (!abmLyMap[abmCode]) abmLyMap[abmCode] = {};
-            if (!abmLyMap[abmCode][cat]) abmLyMap[abmCode][cat] = { lyTarget: 0, lyAchieved: 0 };
-            abmLyMap[abmCode][cat].lyTarget   += parseFloat(row.ly_target_value   || 0);
-            abmLyMap[abmCode][cat].lyAchieved += parseFloat(row.ly_achieved_value || 0);
-          }
+        for (const row of lyTbmRows) {
+          const abmCode = tbmToAbm[row.assignee_code];
+          if (!abmCode) continue;
+          const cat = row.category_name || 'Other';
+          if (!abmLyMap[abmCode]) abmLyMap[abmCode] = {};
+          if (!abmLyMap[abmCode][cat]) abmLyMap[abmCode][cat] = { lyTarget: 0, lyAchieved: 0 };
+          abmLyMap[abmCode][cat].lyTarget   += parseFloat(row.ly_target_value   || 0);
+          abmLyMap[abmCode][cat].lyAchieved += parseFloat(row.ly_achieved_value || 0);
         }
       }
     }
@@ -483,8 +454,8 @@ const ZBMService = {
             id:           a.id,
             categoryName: a.category_name,
             yearlyTarget: parseFloat(a.cy_target_value || 0),
-            lyTarget:     ly.lyTarget   || parseFloat(a.ly_target_value   || 0),
-            lyAchieved:   ly.lyAchieved || parseFloat(a.ly_achieved_value || 0),
+            lyTarget:     ly.lyTarget   || 0,
+            lyAchieved:   ly.lyAchieved || 0,
             status:       a.status,
             area:         a.area_name,
           };
@@ -602,19 +573,10 @@ const ZBMService = {
   // GET /zbm/sh-assigned-target
   async getSHAssignedTarget(zbmEmployeeCode) {
     const CY_FY = 'FY26_27';
-    const LY_FY = 'FY25_26';
-    const cyRow = await db('ts_yearly_target_assignments')
+    const row = await db('ts_yearly_target_assignments')
       .where({ assignee_code: zbmEmployeeCode, fiscal_year_code: CY_FY })
       .first('cy_target_value');
-    const lyRow = await db('ts_yearly_target_assignments')
-      .where({ assignee_code: zbmEmployeeCode, fiscal_year_code: LY_FY })
-      .sum({ lyTarget: 'ly_target_value', lyAchieved: 'ly_achieved_value' })
-      .first();
-    return {
-      shAssignedTarget: cyRow ? (parseFloat(cyRow.cy_target_value) || 0) : 0,
-      lyTarget:         lyRow ? (parseFloat(lyRow.lyTarget)         || 0) : 0,
-      lyAchieved:       lyRow ? (parseFloat(lyRow.lyAchieved)       || 0) : 0,
-    };
+    return { shAssignedTarget: row ? (parseFloat(row.cy_target_value) || 0) : 0 };
   },
 
   // GET /zbm/unique-abms

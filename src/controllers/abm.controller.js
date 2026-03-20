@@ -18,4 +18,7 @@ module.exports = {
   async getUniqueTbms(req, res, next) { try { res.json(await ABMService.getUniqueTbms(req.user.employeeCode)); } catch (err) { next(err); } },
   async getDashboardStats(req, res, next) { try { res.json(await ABMService.getDashboardStats(req.user.employeeCode)); } catch (err) { next(err); } },
   async publishTeamYearlyTargets(req, res, next) { try { const { memberIds, fiscalYear } = req.body; if (!Array.isArray(memberIds) || memberIds.length === 0) return res.status(400).json({ success: false, message: 'memberIds required' }); res.json(await ABMService.publishTeamYearlyTargets(memberIds, req.user, fiscalYear)); } catch (err) { next(err); } },
+  async getSpecialistYearlyTargets(req, res, next) { try { res.json(await ABMService.getSpecialistYearlyTargets(req.user.employeeCode, req.query.fy)); } catch (err) { next(err); } },
+  async saveSpecialistYearlyTargets(req, res, next) { try { res.json(await ABMService.saveSpecialistYearlyTargets(req.body.targets, req.user, req.body.fiscalYear)); } catch (err) { if (err.status) return res.status(err.status).json(errorResponse(err.message)); next(err); } },
+  async publishSpecialistYearlyTargets(req, res, next) { try { const { memberIds, fiscalYear } = req.body; if (!Array.isArray(memberIds) || memberIds.length === 0) return res.status(400).json({ success: false, message: 'memberIds required' }); res.json(await ABMService.publishSpecialistYearlyTargets(memberIds, req.user, fiscalYear)); } catch (err) { next(err); } },
 };

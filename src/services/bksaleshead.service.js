@@ -68,7 +68,7 @@ const SalesHeadService = {
 
     const getDirectReports = async (empCode) => {
       const res = await getKnex().raw(
-        `SELECT employee_code, full_name, designation, zone_name, area_name, territory_name, zone_code, area_code, territory_code, role
+        `SELECT employee_code, full_name, designation, zone_name, area_name, territory_name, role
          FROM aop.ts_auth_users WHERE reports_to = ? AND is_active = true`,
         [empCode]
       );
@@ -130,7 +130,6 @@ const SalesHeadService = {
               fullName: sr.full_name,
               designation: sr.designation,
               territory: sr.territory_name || sr.area_name || sr.zone_name,
-              code: sr.territory_code || '',
               zone: sr.zone_name,
               products,
             });
@@ -143,7 +142,6 @@ const SalesHeadService = {
             fullName: tbm.full_name,
             designation: tbm.designation,
             territory: tbm.area_name || tbm.zone_name,
-            code: tbm.territory_code || tbm.area_code || '',
             zone: tbm.zone_name,
             salesReps,
           });
@@ -156,7 +154,6 @@ const SalesHeadService = {
           fullName: abm.full_name,
           designation: abm.designation,
           territory: abm.area_name || abm.zone_name,
-          code: abm.area_code || '',
           zone: abm.zone_name,
           tbms,
         });
@@ -169,7 +166,6 @@ const SalesHeadService = {
         fullName: zbm.full_name,
         designation: zbm.designation,
         territory: zbm.zone_name,
-        code: zbm.zone_code || '',
         zone: zbm.zone_name,
         abms,
       });

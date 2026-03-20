@@ -205,36 +205,30 @@ async function buildAbmDrilldown(abm, activeFy) {
           });
 
           return {
-            id:          rep.employee_code,
-            name:        rep.full_name,
-            designation: rep.designation || '',
-            territory:   rep.territory_name || rep.area_name || '—',
-            code:        rep.territory_code || '',
-            role:        rep.role,
+            id:        rep.employee_code,
+            name:      rep.full_name,
+            territory: rep.territory_name || rep.area_name || '—',
+            role:      rep.role,
             products,
           };
         })
       );
 
       return {
-        id:          tbm.employee_code,
-        name:        tbm.full_name,
-        designation: tbm.designation || '',
-        territory:   tbm.territory_name || tbm.area_name || '—',
-        code:        tbm.territory_code || tbm.area_code || '',
-        role:        tbm.role,
+        id:        tbm.employee_code,
+        name:      tbm.full_name,
+        territory: tbm.territory_name || tbm.area_name || '—',
+        role:      tbm.role,
         salesReps,
       };
     })
   );
 
   return {
-    id:          abm.employee_code,
-    name:        abm.full_name,
-    designation: abm.designation || '',
-    territory:   abm.area_name || '—',
-    code:        abm.area_code || '',
-    role:        abm.role,
+    id:        abm.employee_code,
+    name:      abm.full_name,
+    territory: abm.area_name || '—',
+    role:      abm.role,
     tbms,
   };
 }
@@ -384,7 +378,6 @@ const ZBMService = {
       fullName:     r.full_name,
       designation:  r.designation,
       area:         r.area_name,
-      areaCode:     r.area_code,
       role:         r.role,
     }));
   },
@@ -476,9 +469,7 @@ const ZBMService = {
       return {
         employeeCode: r.employee_code,
         fullName:     r.full_name,
-        designation:  r.designation || '',
         area:         r.area_name,
-        areaCode:     r.area_code,
         targets,
       };
     });

@@ -259,7 +259,7 @@ const ABMService = {
     for (const tbm of directReports) {
       const srReports = await db('ts_auth_users').where({ reports_to: tbm.employee_code, is_active: true }).select('employee_code');
       const commitments = await db('ts_product_commitments').where({ employee_code: tbm.employee_code, fiscal_year_code: activeFy });
-      result.push({ employeeCode: tbm.employee_code, fullName: tbm.full_name, designation: tbm.designation, territory: tbm.territory_name, role: tbm.role,
+      result.push({ employeeCode: tbm.employee_code, fullName: tbm.full_name, designation: tbm.designation, territory: tbm.territory_name, code: tbm.territory_code || '', role: tbm.role,
         salesRepCount: srReports.length, totalCommitments: commitments.length,
         submitted: commitments.filter((c) => c.status === 'submitted').length,
         approved: commitments.filter((c) => c.status === 'approved').length });
@@ -357,6 +357,7 @@ const ABMService = {
         employeeCode:    r.employee_code,
         fullName:        r.full_name,
         territory:       r.territory_name || r.area_name || '',
+        territoryCode:   r.territory_code || '',
         designation:     r.designation    || 'Territory Business Manager',
         lyTargetValue,
         lyAchievedValue,

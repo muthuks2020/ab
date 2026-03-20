@@ -283,22 +283,22 @@ const TBMService = {
       cyRows.forEach((r) => {
         const code = r.product_code;
         if (!productMap[code]) return;
-        const monthKey = MONTH_NAME_MAP[r.fiscal_month?.toLowerCase()];
-        if (!monthKey) return;
 
         productMap[code].status = r.status || 'draft';
         productMap[code].id = r.id;
 
         const mt = r.monthly_targets || {};
-        const cyQty = Number(mt[monthKey]?.cyQty ?? r.target_quantity ?? 0);
-        const cyRev = Number(mt[monthKey]?.cyRev ?? r.target_revenue ?? 0);
-        productMap[code].monthlyTargets[monthKey].cyQty = cyQty;
-        productMap[code].monthlyTargets[monthKey].cyRev = cyRev;
+        MONTHS.forEach((monthKey) => {
+          const cyQty = Number(mt[monthKey]?.cyQty ?? 0);
+          const cyRev = Number(mt[monthKey]?.cyRev ?? 0);
+          productMap[code].monthlyTargets[monthKey].cyQty = cyQty;
+          productMap[code].monthlyTargets[monthKey].cyRev = cyRev;
 
-        if (mt[monthKey]?.lyQty !== undefined) {
-          productMap[code].monthlyTargets[monthKey].lyQty = Number(mt[monthKey].lyQty) || 0;
-          productMap[code].monthlyTargets[monthKey].lyRev = Number(mt[monthKey].lyRev) || 0;
-        }
+          if (mt[monthKey]?.lyQty !== undefined) {
+            productMap[code].monthlyTargets[monthKey].lyQty = Number(mt[monthKey].lyQty) || 0;
+            productMap[code].monthlyTargets[monthKey].lyRev = Number(mt[monthKey].lyRev) || 0;
+          }
+        });
       });
     }
 

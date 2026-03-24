@@ -4,13 +4,16 @@ const { formatCommitment, aggregateMonthlyTargets, calcGrowth } = require('../ut
 function normalizeFY(fyCode) {
   if (!fyCode) return fyCode;
   if (/^FY\d{2}_\d{2}$/.test(fyCode)) return fyCode;
-  const m = fyCode.match(/(\d{4})-(\d{2})/);
+  if (/^\d{4}$/.test(String(fyCode))) {
+    const yr = parseInt(fyCode);
+    return `FY${String(yr - 1).slice(-2)}_${String(yr).slice(-2)}`;
+  }
+  const m = String(fyCode).match(/(\d{4})-(\d{2})/);
   if (m) return `FY${String(m[1]).slice(-2)}_${m[2]}`;
   return fyCode;
 }
 
 const TBMService = {
-
   async getSalesRepSubmissions(tbmEmployeeCode, filters = {}) {
     const directReports = await getKnex().raw(
       `SELECT employee_code FROM aop.ts_fn_get_direct_reports(?::varchar)`,
@@ -265,36 +268,23 @@ const TBMService = {
       });
     });
 
-    if (activeFyCode) {
-      let cyQuery = db('ts_product_commitments')
-        .where('employee_code', tbmEmployeeCode)
-        .where('fiscal_year_code', activeFyCode);
-      if (filters.status) cyQuery = cyQuery.where('status', filters.status);
+    // CY: read saved territory targets from ts_geography_targets (FY26_27)
+    if (territoryCode) {
+      const cyGeoRows = await db('ts_geography_targets')
+        .where('geo_level', 'territory')
+        .where('fiscal_year_code', 'FY26_27')
+        .where('territory_code', String(territoryCode))
+        .select('product_code', 'monthly_targets', 'status');
 
-      const cyRows = await cyQuery.select(
-        'id', 'product_code', 'fiscal_month', 'status',
-        'target_quantity', 'target_revenue', 'monthly_targets'
-      );
-
-      cyRows.forEach((r) => {
+      cyGeoRows.forEach((r) => {
         const code = r.product_code;
         if (!productMap[code]) return;
-        const monthKey = MONTH_NAME_MAP[r.fiscal_month?.toLowerCase()];
-        if (!monthKey) return;
-
-        productMap[code].status = r.status || 'draft';
-        productMap[code].id = r.id;
-
         const mt = r.monthly_targets || {};
-        const cyQty = Number(mt[monthKey]?.cyQty ?? r.target_quantity ?? 0);
-        const cyRev = Number(mt[monthKey]?.cyRev ?? r.target_revenue ?? 0);
-        productMap[code].monthlyTargets[monthKey].cyQty = cyQty;
-        productMap[code].monthlyTargets[monthKey].cyRev = cyRev;
-
-        if (mt[monthKey]?.lyQty !== undefined) {
-          productMap[code].monthlyTargets[monthKey].lyQty = Number(mt[monthKey].lyQty) || 0;
-          productMap[code].monthlyTargets[monthKey].lyRev = Number(mt[monthKey].lyRev) || 0;
-        }
+        productMap[code].status = r.status || 'draft';
+        MONTHS.forEach((monthKey) => {
+          productMap[code].monthlyTargets[monthKey].cyQty = Number(mt[monthKey]?.cyQty || 0);
+          productMap[code].monthlyTargets[monthKey].cyRev = Number(mt[monthKey]?.cyRev || 0);
+        });
       });
     }
 
@@ -339,22 +329,78 @@ const TBMService = {
   },
 
   async saveTerritoryTargets(targets, tbmUser) {
+    const FY = 'FY26_27';
+    const tbmUserRow = await db('ts_auth_users')
+      .where('employee_code', tbmUser.employeeCode)
+      .first();
+    const territoryCode = tbmUserRow?.territory_code;
+    const territoryName = tbmUserRow?.territory_name || '';
+    const areaCode      = tbmUserRow?.area_code || 'NA';
+    const zoneCode      = tbmUserRow?.zone_code || 'NA';
+
     let savedCount = 0;
     for (const t of targets) {
-      const existing = await db('ts_product_commitments')
-        .where({ id: t.id, employee_code: tbmUser.employeeCode })
-        .whereIn('status', ['not_started', 'draft'])
+      const mt = t.monthlyTargets || {};
+      const hasData = Object.values(mt).some((v) => (v.cyQty || 0) > 0 || (v.cyRev || 0) > 0);
+      if (!hasData) continue;
+
+      const productCode = t.id || t.code || t.productCode;
+
+      // Look up unit cost to compute cyRev = cyQty * unitCost
+      const productRow = await db('product_master')
+        .where('productcode', productCode)
+        .select('quota_price__c')
+        .first();
+      const unitCost = productRow ? (Number(productRow.quota_price__c) || 0) : 0;
+
+      // Recompute cyRev for every month; fall back to frontend value if no unit cost
+      const mtWithRev = {};
+      for (const [month, vals] of Object.entries(mt)) {
+        const cyQty = Number(vals.cyQty || 0);
+        mtWithRev[month] = {
+          ...vals,
+          cyRev: unitCost > 0 ? cyQty * unitCost : Number(vals.cyRev || 0),
+        };
+      }
+
+      const existing = await db('ts_geography_targets')
+        .where({
+          fiscal_year_code: FY,
+          geo_level: 'territory',
+          territory_code: String(territoryCode),
+          product_code: productCode,
+        })
         .first();
 
       if (existing) {
-        await db('ts_product_commitments').where({ id: t.id }).update({
-          monthly_targets: JSON.stringify(t.monthlyTargets),
+        await db('ts_geography_targets').where({ id: existing.id }).update({
+          monthly_targets: JSON.stringify(mtWithRev),
+          set_by_code: tbmUser.employeeCode,
+          set_by_role: 'tbm',
+          status: 'draft',
+          updated_at: new Date(),
+        });
+      } else {
+        await db('ts_geography_targets').insert({
+          fiscal_year_code: FY,
+          geo_level: 'territory',
+          zone_code: zoneCode,
+          zone_name: tbmUserRow?.zone_name || '',
+          area_code: areaCode,
+          area_name: tbmUserRow?.area_name || '',
+          territory_code: String(territoryCode),
+          territory_name: territoryName,
+          product_code: productCode,
+          category_id: null,
+          monthly_targets: JSON.stringify(mtWithRev),
+          set_by_code: tbmUser.employeeCode,
+          set_by_role: 'tbm',
           status: 'draft',
         });
-        savedCount++;
       }
+      savedCount++;
     }
-    return { success: true, savedCount, message: 'Targets saved as draft' };
+    return { success: true, savedCount, message: 'Territory targets saved' };
   },
 
   async submitTerritoryTargets(targetIds, tbmUser) {

@@ -27,9 +27,16 @@ const CommonService = {
         'product_family AS subcategory',
         'product_group AS subgroup',
         'quota_price__c AS unit_cost',
-        'isactive'
+        'isactive',
+        'active_from',
+        'active_to'
       )
       .where('isactive', true)
+      // active_from NULL = always visible (all Salesforce products)
+      // active_from set = only show from that month onward (AOP-created products)
+      .whereRaw('(active_from IS NULL OR active_from <= CURRENT_DATE)')
+      // active_to NULL = no end date; active_to set = hide after that month
+      .whereRaw('(active_to IS NULL OR active_to >= CURRENT_DATE)')
       .orderBy('product_family')
       .orderBy('product_group')
       .orderBy('product_subgroup');
@@ -50,6 +57,8 @@ const CommonService = {
       subgroup: r.subgroup,
       unitCost: parseFloat(r.unit_cost || 0),
       currency: 'INR',
+      activeFrom: r.active_from || null,
+      activeTo: r.active_to || null,
     }));
   },
 

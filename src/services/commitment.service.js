@@ -23,9 +23,11 @@ const CommitmentService = {
   async getProducts(employeeCode, fiscalYearCode) {
     const activeFy = fiscalYearCode || 'FY26_27';
 
+    // Include active_from/active_to so frontend can grey pre-start months
     const pmSubquery = db('product_master')
       .distinctOn('productcode')
-      .select('productcode', 'product_name', 'product_category', 'product_family', 'product_subgroup', 'quota_price__c AS unit_cost')
+      .select('productcode', 'product_name', 'product_category', 'product_family', 'product_subgroup',
+              'quota_price__c AS unit_cost', 'active_from', 'active_to')
       .orderBy('productcode')
       .orderBy('product_name')
       .as('pm');
@@ -34,11 +36,48 @@ const CommitmentService = {
       .join(pmSubquery, 'pm.productcode', 'pc.product_code')
       .where('pc.employee_code', employeeCode)
       .modify((qb) => { if (activeFy) qb.where('pc.fiscal_year_code', activeFy); })
-      .select('pc.*', 'pm.product_name', 'pm.product_category', 'pm.product_family', 'pm.product_subgroup', 'pm.unit_cost')
+      .select('pc.*', 'pm.product_name', 'pm.product_category', 'pm.product_family',
+              'pm.product_subgroup', 'pm.unit_cost', 'pm.active_from', 'pm.active_to')
       .orderBy('pc.category_id')
       .orderBy('pm.product_name');
 
-    return rows.map(formatCommitment);
+    // Map commitment rows — attach activeFrom so grid can grey pre-start months
+    const toDate = (v) => v ? new Date(v).toISOString().slice(0, 10) : null;
+    const commitmentProducts = rows.map((r) => ({
+      ...formatCommitment(r),
+      activeFrom: toDate(r.active_from),
+      activeTo:   toDate(r.active_to),
+    }));
+
+    // AOP-created products (active_from IS NOT NULL) not yet in commitments:
+    // show as stubs so sales rep can enter targets from their start month.
+    const existingCodes = new Set(rows.map((r) => r.product_code));
+    const aopRows = await db('product_master')
+      .where('isactive', true)
+      .whereNotNull('active_from')
+      .whereRaw('active_from <= CURRENT_DATE')
+      .whereRaw('(active_to IS NULL OR active_to >= CURRENT_DATE)')
+      .select('productcode', 'product_subgroup', 'product_name', 'product_category',
+              'product_family', 'product_group', 'quota_price__c AS unit_cost',
+              'active_from', 'active_to');
+
+    const stubProducts = aopRows
+      .filter((p) => !existingCodes.has(p.productcode))
+      .map((p) => ({
+        id:           p.productcode,   // string productcode — saveAll handles this
+        productCode:  p.productcode,
+        productName:  p.product_subgroup || p.product_name || '',
+        categoryId:   p.product_category,
+        subcategory:  p.product_family  || '',
+        unitCost:     parseFloat(p.unit_cost || 0),
+        monthlyTargets: {},
+        status:       'not_started',
+        activeFrom:   toDate(p.active_from),
+        activeTo:     toDate(p.active_to),
+        isNewProduct: true,
+      }));
+
+    return [...commitmentProducts, ...stubProducts];
   },
 
   async saveProduct(commitmentId, monthlyTargets, user) {
@@ -130,8 +169,47 @@ const CommitmentService = {
 
   async saveAll(products, user) {
     let savedCount = 0;
+    const activeFy = 'FY26_27';
 
-    const productIds = products.map((p) => p.id);
+    // ── Step 1: Create commitment rows for new AOP stub products (id = string productcode) ──
+    const newStubs = products.filter((p) => p.isNewProduct && typeof p.id === 'string');
+    for (const stub of newStubs) {
+      // Check if commitment row was already created (concurrent save guard)
+      const existing = await db('ts_product_commitments')
+        .where({ employee_code: user.employeeCode, fiscal_year_code: activeFy, product_code: stub.id })
+        .first();
+      if (!existing) {
+        const [newRow] = await db('ts_product_commitments').insert({
+          fiscal_year_code: activeFy,
+          employee_code:    user.employeeCode,
+          employee_role:    user.role || 'sales_rep',
+          product_code:     stub.id,
+          category_id:      stub.categoryId || null,
+          territory_code:   user.territory_code || user.territoryCode || null,
+          territory_name:   user.territory_name || user.territoryName || null,
+          area_code:        user.area_code      || user.areaCode      || null,
+          area_name:        user.area_name      || user.areaName      || null,
+          zone_code:        user.zone_code      || user.zoneCode      || null,
+          zone_name:        user.zone_name      || user.zoneName      || null,
+          monthly_targets:  JSON.stringify({}),
+          status:           'draft',
+        }).returning('id');
+        // Replace stub's string id with the new integer commitment id in-memory
+        stub._newId = newRow.id;
+      } else {
+        stub._newId = existing.id;
+      }
+    }
+
+    // ── Step 2: Build id list — use _newId for stubs, integer id for existing ──
+    const resolvedProducts = products.map((p) =>
+      p._newId != null ? { ...p, id: p._newId } : p
+    );
+
+    const productIds = resolvedProducts
+      .filter((p) => !p.isNewProduct || p._newId != null)
+      .map((p) => p.id);
+
     const pmSub = db('product_master')
       .distinctOn('productcode')
       .select('productcode', 'quota_price__c AS unit_cost')
@@ -147,7 +225,7 @@ const CommitmentService = {
       commitmentRows.map((r) => [r.id, parseFloat(r.unit_cost || 0)])
     );
 
-    for (const p of products) {
+    for (const p of resolvedProducts) {
       if (!unitCostMap.hasOwnProperty(p.id)) continue;
 
       const unitCost = unitCostMap[p.id];

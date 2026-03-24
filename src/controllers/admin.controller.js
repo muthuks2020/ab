@@ -18,8 +18,8 @@ module.exports = {
   async getTransferHistory(req, res, next) { try { res.json(await AdminService.getTransferHistory(req.query.employeeCode)); } catch (err) { next(err); } },
 
   async getProducts(req, res, next) { try { res.json(await AdminService.getProducts(req.query)); } catch (err) { next(err); } },
-  async createProduct(req, res, next) { try { res.status(501).json({ success: false, message: 'Products are managed via Salesforce. Local creation not supported.' }); } catch (err) { next(err); } },
-  async updateProduct(req, res, next) { try { res.status(501).json({ success: false, message: 'Products are managed via Salesforce. Local update not supported.' }); } catch (err) { next(err); } },
+  async createProduct(req, res, next) { try { res.status(201).json(await AdminService.createProduct(req.body)); } catch (err) { if (err.status) return res.status(err.status).json(errorResponse(err.message)); next(err); } },
+  async updateProduct(req, res, next) { try { res.json(await AdminService.updateProduct(req.params.id, req.body)); } catch (err) { if (err.status) return res.status(err.status).json(errorResponse(err.message)); next(err); } },
   async deleteProduct(req, res, next) { try { res.status(501).json({ success: false, message: 'Products are managed via Salesforce. Local deletion not supported.' }); } catch (err) { next(err); } },
   async toggleProductStatus(req, res, next) { try { res.json(await AdminService.toggleProductStatus(req.params.id)); } catch (err) { if (err.status) return res.status(err.status).json(errorResponse(err.message)); next(err); } },
 

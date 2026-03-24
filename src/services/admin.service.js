@@ -1,6 +1,7 @@
 'use strict';
-const { db } = require('../config/database');
+const { db, getKnex } = require('../config/database');
 const bcrypt = require('bcrypt');
+const crypto = require('crypto');
 
 const getActiveFY = async () => {
   const fy = await db('ts_fiscal_years').where({ is_active: true }).first();
@@ -149,16 +150,77 @@ const AdminService = {
   },
 
   async getProducts(filters = {}) {
-    let query = db('product_master').orderBy('product_name');
+    let query = db('product_master').orderBy('product_subgroup');
     if (filters.category) query = query.where('product_category', filters.category);
-    if (filters.search) query = query.where(function() { this.where('product_name', 'ilike', `%${filters.search}%`).orWhere('productcode', 'ilike', `%${filters.search}%`); });
+    if (filters.search) query = query.where(function() { this.where('product_subgroup', 'ilike', `%${filters.search}%`).orWhere('product_name', 'ilike', `%${filters.search}%`).orWhere('productcode', 'ilike', `%${filters.search}%`); });
     if (filters.isActive !== undefined) query = query.where('isactive', filters.isActive === 'true');
     const rows = await query.limit(500);
     return rows.map((r) => ({
-      productCode: r.productcode, productName: r.product_name, categoryId: r.product_category,
+      id: r.productcode,           // used as URL param in updateProduct
+      productCode: r.productcode,
+      // product_name is NULL in DB — actual name lives in product_subgroup
+      productName: r.product_subgroup || r.product_name || '',
+      productSubgroup: r.product_subgroup || r.product_name || '',
+      categoryId: r.product_category,
       productFamily: r.product_family, productGroup: r.product_group,
-      unitCost: parseFloat(r.quota_price__c || 0), isActive: r.isactive,
+      // quota_price__c is the populated price field; unitprice is NULL
+      unitCost: parseFloat(r.quota_price__c || 0),
+      quotaPrice: parseFloat(r.quota_price__c || 0),
+      isActive: r.isactive,
+      // Serialize DATE → 'YYYY-MM-DD' string (pg returns Date objects for DATE columns)
+      activeFrom: r.active_from ? new Date(r.active_from).toISOString().slice(0, 10) : null,
+      activeTo:   r.active_to   ? new Date(r.active_to).toISOString().slice(0, 10)   : null,
     }));
+  },
+
+  async createProduct(data) {
+    // Generate AOP ID: 'AOP' prefix + 14 random alphanumeric chars (17 chars total)
+    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+    const rand = crypto.randomBytes(14);
+    const suffix = Array.from(rand).map(b => chars[b % chars.length]).join('');
+    const productCode = 'AOP' + suffix;   // AOP prefix = created in AOP application
+
+    // Check for duplicate productcode (shouldn't happen with random, but guard it)
+    const existing = await db('product_master').where('productcode', productCode).first();
+    if (existing) throw Object.assign(new Error('Generated code collision, please retry.'), { status: 409 });
+
+    // INSERT includes active_from/active_to — columns confirmed to exist
+    const row = {
+      productcode:      productCode,
+      product_subgroup: data.name        || '',
+      product_name:     data.name        || '',
+      product_category: data.categoryId  || null,
+      product_family:   data.subcategory || null,
+      product_group:    data.subcategory || null,
+      quota_price__c:   data.listPrice != null ? Number(data.listPrice) : null,
+      isactive:         data.isActive !== undefined ? data.isActive : true,
+      active_from:      data.activeFrom || null,
+      active_to:        data.activeTo   || null,
+      created_at:       new Date(),
+      updated_at:       new Date(),
+    };
+
+    await db('product_master').insert(row);
+
+    return { success: true, productCode, id: productCode };
+  },
+
+  async updateProduct(productCode, data) {
+    const product = await db('product_master').where('productcode', productCode).first();
+    if (!product) throw Object.assign(new Error('Product not found.'), { status: 404 });
+
+    // Single UPDATE — all fields including active_from/active_to (ALTER TABLE confirmed run)
+    const updateData = { updated_at: new Date() };
+    if (data.name        !== undefined) updateData.product_subgroup = data.name;
+    if (data.categoryId  !== undefined) updateData.product_category = data.categoryId;
+    if (data.subcategory !== undefined) updateData.product_family   = data.subcategory;
+    if (data.listPrice   !== undefined) updateData.quota_price__c   = Number(data.listPrice) || null;
+    if (data.isActive    !== undefined) updateData.isactive         = data.isActive;
+    if (data.activeFrom  !== undefined) updateData.active_from      = data.activeFrom || null;
+    if (data.activeTo    !== undefined) updateData.active_to        = data.activeTo   || null;
+    await db('product_master').where('productcode', productCode).update(updateData);
+
+    return { success: true, productCode };
   },
 
   async getCategories() {
@@ -173,8 +235,26 @@ const AdminService = {
   },
 
   async getHierarchy() {
-    const rows = await db('ts_v_org_hierarchy');
-    return rows;
+    const result = await getKnex().raw(`
+      WITH RECURSIVE org AS (
+        SELECT employee_code, full_name, role::text AS role,
+               designation, zone_name, area_name, territory_name,
+               reports_to, zone_code, area_code, territory_code,
+               is_vacant, is_active, 0 AS depth
+        FROM   aop.ts_auth_users
+        WHERE  reports_to IS NULL AND is_active = TRUE
+        UNION ALL
+        SELECT u.employee_code, u.full_name, u.role::text,
+               u.designation, u.zone_name, u.area_name, u.territory_name,
+               u.reports_to, u.zone_code, u.area_code, u.territory_code,
+               u.is_vacant, u.is_active, o.depth + 1
+        FROM   aop.ts_auth_users u
+        JOIN   org o ON u.reports_to = o.employee_code
+        WHERE  u.is_active = TRUE AND o.depth < 6
+      )
+      SELECT * FROM org ORDER BY depth, zone_name, area_name, full_name
+    `);
+    return result.rows;
   },
 
   async getVacantPositions() {

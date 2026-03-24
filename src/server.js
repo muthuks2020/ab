@@ -27,6 +27,7 @@ const abmRoutes = require('./routes/abm.routes');
 const zbmRoutes = require('./routes/zbm.routes');
 const salesheadRoutes = require('./routes/saleshead.routes');
 const adminRoutes     = require('./routes/admin.routes');
+const abmAreaTargetsRoutes = require('./routes/abmAreaTargets.routes');
 
 // Middleware imports for inline auth on ABM specialist routes
 const authenticate = require('./middleware/authenticate');
@@ -250,6 +251,7 @@ app.use(API_PREFIX, commonRoutes);            // ★ SECOND — /categories, /fi
 app.use(`${API_PREFIX}/tbm`, tbmRoutes);
 app.use(`${API_PREFIX}/specialist`, specialistRoutes);
 app.use(`${API_PREFIX}/abm`, abmSpecialistRoutes);
+app.use(`${API_PREFIX}/abm`, abmAreaTargetsRoutes);
 app.use(`${API_PREFIX}/abm`, abmRoutes);
 app.use(`${API_PREFIX}/zbm`, zbmRoutes);
 app.use(`${API_PREFIX}/saleshead`, salesheadRoutes);

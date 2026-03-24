@@ -158,6 +158,7 @@ const ABMService = {
       .where('isactive', true)
       .select(
         'productcode',
+        'product_name',      
         'product_subgroup AS display_name',
         'product_category',
         'product_family AS subcategory',
@@ -171,7 +172,7 @@ const ABMService = {
       const code = p.productcode;
       productMap[code] = {
         id: code, productCode: code, code,
-        name: p.display_name || code,
+        name: p.display_name || p.product_name || code,
         categoryId: normalizeCat(p.product_category),
         subcategory: p.subcategory || null,
         subgroup: p.subgroup || null,

@@ -67,7 +67,7 @@ const saveTerritoryTargetsSchema = Joi.object({
 });
 
 const submitTerritoryTargetsSchema = Joi.object({
-  targetIds: Joi.array().items(Joi.number().integer().positive()).min(1).required(),
+  fiscalYear: Joi.string().optional(),
 });
 
 const saveYearlyTargetsSchema = Joi.object({

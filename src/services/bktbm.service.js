@@ -14,6 +14,7 @@ function normalizeFY(fyCode) {
 }
 
 const TBMService = {
+
   async getSalesRepSubmissions(tbmEmployeeCode, filters = {}) {
     const directReports = await getKnex().raw(
       `SELECT employee_code FROM aop.ts_fn_get_direct_reports(?::varchar)`,
@@ -36,13 +37,13 @@ const TBMService = {
     if (filters.categoryId) query = query.where('pc.category_id', filters.categoryId);
     if (filters.salesRepId || filters.employeeCode) query = query.where('pc.employee_code', filters.salesRepId || filters.employeeCode);
 
-    const activeFy = await db('ts_fiscal_years').where('is_active', true).first();
-    if (activeFy) query = query.where('pc.fiscal_year_code', activeFy.code);
+    // CY is always FY26_27 — hardcoded to avoid active-flag ambiguity
+    query = query.where('pc.fiscal_year_code', 'FY26_27');
 
     const rows = await query
       .select(
         'pc.*',
-        'pm.product_name', 'pm.quota_price__c AS unit_cost',
+        'pm.product_name', 'pm.product_subgroup', 'pm.quota_price__c AS unit_cost',
         'u.full_name AS employee_name', 'u.role AS employee_role'
       )
       .orderBy('u.full_name').orderBy('pc.category_id').orderBy('pm.product_name');
@@ -54,7 +55,7 @@ const TBMService = {
       territory: r.territory_name,
       categoryId: r.category_id,
       subcategory: null,
-      name: r.product_name,
+      name: r.product_subgroup || r.product_name || r.product_code,
       code: r.product_code,
       status: r.status,
       submittedDate: r.submitted_at,
@@ -242,7 +243,8 @@ const TBMService = {
         'product_category',
         'product_family AS subcategory',
         'product_group AS subgroup',
-        'quota_price__c AS unit_cost'
+        'quota_price__c AS unit_cost',
+        'active_from'
       )
       .orderBy('product_family')
       .orderBy('product_group')
@@ -260,6 +262,7 @@ const TBMService = {
         subcategory: p.subcategory || null,
         subgroup: p.subgroup || null,
         unitCost: Number(p.unit_cost) || 0,
+        activeFrom: p.active_from ? new Date(p.active_from).toISOString().substring(0, 10) : null,
         status: 'not_started',
         monthlyTargets: {},
       };
@@ -280,10 +283,15 @@ const TBMService = {
         const code = r.product_code;
         if (!productMap[code]) return;
         const mt = r.monthly_targets || {};
+        const unitCost = productMap[code].unitCost || 0;
         productMap[code].status = r.status || 'draft';
         MONTHS.forEach((monthKey) => {
-          productMap[code].monthlyTargets[monthKey].cyQty = Number(mt[monthKey]?.cyQty || 0);
-          productMap[code].monthlyTargets[monthKey].cyRev = Number(mt[monthKey]?.cyRev || 0);
+          const cyQty = Number(mt[monthKey]?.cyQty || 0);
+          const storedRev = Number(mt[monthKey]?.cyRev || 0);
+          // Recompute cyRev from unitCost if stored value is 0
+          const cyRev = storedRev > 0 ? storedRev : (unitCost > 0 ? cyQty * unitCost : 0);
+          productMap[code].monthlyTargets[monthKey].cyQty = cyQty;
+          productMap[code].monthlyTargets[monthKey].cyRev = cyRev;
         });
       });
     }

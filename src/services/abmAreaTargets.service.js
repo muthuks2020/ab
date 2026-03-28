@@ -163,8 +163,8 @@ const ABMAreaTargetsService = {
         .first();
 
       if (existing) {
-        // Never downgrade published → draft
-        const newStatus = existing.status === 'published' ? 'published' : 'draft';
+        // Never downgrade published or submitted → draft
+        const newStatus = ['published', 'submitted'].includes(existing.status) ? existing.status : 'draft';
         await db('ts_geography_targets')
           .where({ id: existing.id })
           .update({
@@ -198,6 +198,46 @@ const ABMAreaTargetsService = {
     }
 
     return { success: true, savedCount };
+  },
+
+  /**
+   * SUBMIT area targets to ZBM.
+   * Updates all draft rows for this ABM's area to status='submitted'.
+   * Blocks re-submission if already submitted.
+   */
+  async submitAreaTargets(abmUser) {
+    const fy       = 'FY26_27';
+    const areaCode = String(abmUser.areaCode || abmUser.area_code || '');
+    const now      = new Date();
+
+    const existingRows = await db('ts_geography_targets')
+      .where({ geo_level: 'area', fiscal_year_code: fy, area_code: areaCode })
+      .select('id', 'status');
+
+    if (existingRows.length === 0) {
+      throw Object.assign(
+        new Error('No area targets found to submit. Please save targets first.'),
+        { status: 400 }
+      );
+    }
+
+    const alreadyAllSubmitted = existingRows.every(r => r.status === 'submitted' || r.status === 'published');
+    if (alreadyAllSubmitted) {
+      throw Object.assign(
+        new Error('Area targets have already been submitted to ZBM.'),
+        { status: 400 }
+      );
+    }
+
+    const draftIds = existingRows
+      .filter(r => r.status !== 'submitted' && r.status !== 'published')
+      .map(r => r.id);
+
+    await db('ts_geography_targets')
+      .whereIn('id', draftIds)
+      .update({ status: 'submitted', updated_at: now });
+
+    return { success: true, submittedCount: draftIds.length };
   },
 };
 

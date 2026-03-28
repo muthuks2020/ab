@@ -20,4 +20,5 @@ module.exports = {
   async getAnalyticsDistribution(req, res, next) { try { res.json(await SalesHeadService.getAnalyticsDistribution(req.query)); } catch (err) { next(err); } },
   async getAnalyticsComparison(req, res, next) { try { res.json(await SalesHeadService.getAnalyticsComparison(req.query)); } catch (err) { next(err); } },
   async getAnalyticsAchievement(req, res, next) { try { res.json(await SalesHeadService.getAnalyticsAchievement(req.query)); } catch (err) { next(err); } },
+  async getProductVisibility(req, res, next) { try { res.json(await SalesHeadService.getProductVisibility(req.query.level || 'zbm')); } catch (err) { next(err); } },
 };

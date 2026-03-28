@@ -169,44 +169,37 @@ const SalesHeadService = {
         }
       }
 
-      // ── Step 3: Merge CY + LY, then group by productName ────────────────
-      // Multiple product_codes can share the same resolved product_name
-      // (e.g. several Hydrophobic IOL SKUs all resolve to "Hydrophobic").
-      // We sum their monthly values into one row per unique name.
-      const nameMap = {}; // productName → accumulated entry
-
-      for (const r of cyRes.rows) {
+      // ── Step 3: Merge CY + LY into unified monthlyTargets ────────────────
+      const products = cyRes.rows.map(r => {
         const cyMt      = r.monthly_targets || {};
         const cyFlatRev = parseFloat(r.cy_flat_rev || 0);
         const cyFlatQty = parseInt(r.cy_flat_qty   || 0);
         const ly        = lyMap[r.product_code] || { lyRevPerMonth: 0, lyQtyPerMonth: 0 };
-        const name      = r.product_name || r.product_code;
 
-        // Determine if JSONB has any CY monthly data for this row
+        // Determine if JSONB has any CY data at all
         const jsonbHasCyData = FISCAL_MONTHS.some(m => (cyMt[m]?.cyRev || 0) > 0);
 
-        if (!nameMap[name]) {
-          nameMap[name] = {
-            productId:      r.product_code, // first code wins as representative id
-            productName:    name,
-            category:       r.product_category,
-            status:         r.status,
-            monthlyTargets: {},
-          };
-          FISCAL_MONTHS.forEach(m => { nameMap[name].monthlyTargets[m] = { cyRev: 0, cyQty: 0, lyRev: 0, lyQty: 0 }; });
-        }
-
+        const mergedMt = {};
         FISCAL_MONTHS.forEach(m => {
           const cyMonth = cyMt[m] || {};
-          const entry   = nameMap[name].monthlyTargets[m];
-          entry.cyRev += cyMonth.cyRev || (!jsonbHasCyData ? cyFlatRev / 12 : 0);
-          entry.cyQty += cyMonth.cyQty || (!jsonbHasCyData ? cyFlatQty / 12 : 0);
-          entry.lyRev += ly.lyRevPerMonth;
-          entry.lyQty += ly.lyQtyPerMonth;
+          mergedMt[m] = {
+            // CY: prefer JSONB monthly value; fallback to flat total ÷ 12
+            cyRev: cyMonth.cyRev || (!jsonbHasCyData ? cyFlatRev / 12 : 0),
+            cyQty: cyMonth.cyQty || (!jsonbHasCyData ? cyFlatQty / 12 : 0),
+            // LY: always from lyMap (FY25_26 flat or JSONB)
+            lyRev: ly.lyRevPerMonth,
+            lyQty: ly.lyQtyPerMonth,
+          };
         });
-      }
 
-      const products = Object.values(nameMap);
+        return {
+          productId:      r.product_code,
+          productName:    r.product_name || r.product_code,
+          category:       r.product_category,
+          status:         r.status,
+          monthlyTargets: mergedMt,
+        };
+      });
 
       // ── Step 4: Sort — non-zero totals first, then zeros ─────────────────
       return products.sort((a, b) => {
@@ -328,42 +321,31 @@ const SalesHeadService = {
       });
     });
 
-    // Query 1: FY26_27 ly_target_value / ly_achieved_value (backfilled by each manager on save)
-    // Matches abm.service priority — FY26_27 ly columns first
-    const cyAssignRows = allCodes.length > 0
+    // Query 1: FY25_26 ts_yearly_target_assignments
+    // cy_target_value = what they were assigned as target last year = LY Tgt
+    // ly_achieved_value = actual achievement recorded last year = LY Ahv
+    const lyAssignRows = allCodes.length > 0
       ? await db('ts_yearly_target_assignments')
           .whereIn('assignee_code', allCodes)
-          .where('fiscal_year_code', 'FY26_27')
-          .select('assignee_code', 'ly_target_value', 'ly_achieved_value')
+          .where('fiscal_year_code', 'FY25_26')
+          .select('assignee_code', 'cy_target_value', 'ly_achieved_value')
       : [];
 
     const lyMap = {};
-    for (const r of cyAssignRows) {
+    for (const r of lyAssignRows) {
       if (!lyMap[r.assignee_code]) lyMap[r.assignee_code] = { lyTgt: 0, lyAhv: 0 };
-      lyMap[r.assignee_code].lyTgt += parseFloat(r.ly_target_value   || 0);
+      lyMap[r.assignee_code].lyTgt += parseFloat(r.cy_target_value   || 0);
       lyMap[r.assignee_code].lyAhv += parseFloat(r.ly_achieved_value || 0);
     }
 
-    // Query 2: Fallback for any node with no FY26_27 ly data — use FY25_26 cy_target_value
-    const codesNoLyTgt = allCodes.filter(c => !(lyMap[c]?.lyTgt > 0));
-    if (codesNoLyTgt.length > 0) {
-      const lyAssignRows = await db('ts_yearly_target_assignments')
-        .whereIn('assignee_code', codesNoLyTgt)
-        .where('fiscal_year_code', 'FY25_26')
-        .select('assignee_code', 'cy_target_value', 'ly_achieved_value');
-      for (const r of lyAssignRows) {
-        if (!lyMap[r.assignee_code]) lyMap[r.assignee_code] = { lyTgt: 0, lyAhv: 0 };
-        lyMap[r.assignee_code].lyTgt += parseFloat(r.cy_target_value   || 0);
-        lyMap[r.assignee_code].lyAhv += parseFloat(r.ly_achieved_value || 0);
-      }
-    }
-
-    // Query 3: Fallback for ALL nodes still missing lyTgt — sum ts_product_commitments FY25_26
-    // Matches abm.service lyCommitMap: TBMs (and SRs) have commitment rows in FY25_26
-    const allCodesNoData = allCodes.filter(c => !(lyMap[c]?.lyTgt > 0));
-    if (allCodesNoData.length > 0) {
+    // Query 2: Fallback for SRs with no assignment rows — use FY25_26 flat target_revenue
+    const srCodes = result.flatMap(z =>
+      z.abms.flatMap(a => a.tbms.flatMap(t => t.salesReps.map(r => r.employeeCode)))
+    );
+    const srCodesNoData = srCodes.filter(c => !(lyMap[c]?.lyTgt > 0));
+    if (srCodesNoData.length > 0) {
       const commitRows = await db('ts_product_commitments')
-        .whereIn('employee_code', allCodesNoData)
+        .whereIn('employee_code', srCodesNoData)
         .where('fiscal_year_code', 'FY25_26')
         .select('employee_code')
         .sum({ lyTgt: 'target_revenue' })
@@ -492,8 +474,8 @@ const SalesHeadService = {
         fullName:      zbm.full_name,
         zone:          zbm.zone_name,
         designation:   zbm.designation,
-        lyTargetValue:   lyTargetValue,
-        lyAchievedValue: lyAchievedValue,
+        lyTarget:      lyTargetValue,
+        lyAchieved:    lyAchievedValue,
         cyTargetValue: parseFloat(assignment?.cy_target_value || 0),
         status:        assignment?.status || 'not_set',
         assignmentId:  assignment?.id || null,
@@ -663,154 +645,6 @@ const SalesHeadService = {
       result.push({ zoneCode: z.zone_code, zoneName: z.zone_name, total: parseInt(total.count), approved: parseInt(approved.count), achievementRate: parseInt(total.count) > 0 ? Math.round((parseInt(approved.count) / parseInt(total.count)) * 100) : 0 });
     }
     return result;
-  },
-
-  async getProductVisibility(level) {
-    const FISCAL_MONTHS = ['apr','may','jun','jul','aug','sep','oct','nov','dec','jan','feb','mar'];
-
-    // Map UI level key → role strings stored in ts_auth_users.role (matched LOWER TRIM)
-    const LEVEL_ROLES = {
-      zbm: ['zonal business manager', 'zbm', 'zonal_business_manager', 'zonal manager'],
-      abm: ['area business manager',  'abm', 'area_business_manager',  'area manager'],
-      tbm: ['territory business manager', 'tbm', 'territory_business_manager', 'territory manager'],
-      rep: ['sales_rep', 'sales rep', 'sales representative', 'sales_representative',
-            'equipment specialist - surgical systems', 'equipment specialist- surgical systems'],
-    };
-    const roles = LEVEL_ROLES[level] || LEVEL_ROLES.rep;
-    const rolePlaceholders = roles.map(() => '?').join(', ');
-
-    // ── CY commitments (FY26_27) for all employees at this role ──────────
-    // DISTINCT ON (employee_code, product_code) deduplicates rows.
-    // COALESCE name chain: product_name → product_family → product_group → product_code.
-    const cySql = `
-      SELECT DISTINCT ON (pc.employee_code, pc.product_code)
-        pc.employee_code,
-        pc.product_code,
-        pc.monthly_targets,
-        pc.target_quantity  AS flat_qty,
-        u.full_name,
-        u.role              AS user_role,
-        u.zone_name,
-        u.area_name,
-        u.territory_name,
-        COALESCE(
-          NULLIF(TRIM(pm.product_name),''),
-          NULLIF(TRIM(pm.product_family),''),
-          NULLIF(TRIM(pm.product_group),''),
-          pc.product_code
-        ) AS product_display_name
-      FROM aop.ts_product_commitments pc
-      JOIN aop.ts_auth_users u
-        ON u.employee_code = pc.employee_code AND u.is_active = true
-      LEFT JOIN (
-        SELECT DISTINCT ON (productcode)
-          productcode, product_name, product_family, product_group
-        FROM aop.product_master
-        ORDER BY productcode
-      ) pm ON pm.productcode = pc.product_code
-      WHERE pc.fiscal_year_code = 'FY26_27'
-        AND LOWER(TRIM(u.role)) IN (${rolePlaceholders})
-      ORDER BY pc.employee_code, pc.product_code, pc.updated_at DESC
-    `;
-    const cyRes = await getKnex().raw(cySql, roles);
-    console.log(`[getProductVisibility] level=${level} CY rows: ${cyRes.rows.length}`);
-
-    // ── LY commitments (FY25_26) — monthly_targets JSONB is empty for FY25_26;
-    //    real data is in flat target_quantity column.
-    const lySql = `
-      SELECT DISTINCT ON (pc.employee_code, pc.product_code)
-        pc.employee_code,
-        pc.product_code,
-        pc.target_quantity  AS flat_qty,
-        pc.monthly_targets
-      FROM aop.ts_product_commitments pc
-      JOIN aop.ts_auth_users u
-        ON u.employee_code = pc.employee_code AND u.is_active = true
-      WHERE pc.fiscal_year_code = 'FY25_26'
-        AND LOWER(TRIM(u.role)) IN (${rolePlaceholders})
-      ORDER BY pc.employee_code, pc.product_code, pc.updated_at DESC
-    `;
-    const lyRes = await getKnex().raw(lySql, roles);
-
-    // Build LY lookup: "empCode:productCode" → { perMonth qty }
-    const lyLookup = {};
-    for (const r of lyRes.rows) {
-      const key = `${r.employee_code}:${r.product_code}`;
-      const mt  = r.monthly_targets || {};
-      let total = 0;
-      const months = {};
-      for (const m of FISCAL_MONTHS) {
-        const md  = mt[m];
-        let qty   = 0;
-        if (md && typeof md === 'object') {
-          qty = Number(md.lyQty || md.cyQty || md.qty || 0);
-        } else if (md != null) {
-          qty = Number(md || 0);
-        }
-        months[m] = qty;
-        total += qty;
-      }
-      // If JSONB is all zeros, distribute flat_qty evenly across 12 months
-      if (total === 0 && r.flat_qty) {
-        const perMonth = Math.round(r.flat_qty / 12);
-        for (const m of FISCAL_MONTHS) months[m] = perMonth;
-      }
-      lyLookup[key] = months;
-    }
-
-    // ── Group CY rows by employee ─────────────────────────────────────────
-    const empMap = {};
-    for (const r of cyRes.rows) {
-      const emp = r.employee_code;
-      if (!empMap[emp]) {
-        empMap[emp] = {
-          employeeCode:  emp,
-          fullName:      r.full_name,
-          role:          r.user_role,
-          zoneName:      r.zone_name      || null,
-          areaName:      r.area_name      || null,
-          territoryName: r.territory_name || null,
-          products:      [],
-        };
-      }
-
-      // Extract CY monthly qty
-      const mt = r.monthly_targets || {};
-      const cyMonths = {};
-      let cyTotal = 0;
-      for (const m of FISCAL_MONTHS) {
-        const md  = mt[m];
-        let qty   = 0;
-        if (md && typeof md === 'object') {
-          qty = Number(md.cyQty || md.qty || 0);
-        } else if (md != null) {
-          qty = Number(md || 0);
-        }
-        cyMonths[m] = qty;
-        cyTotal    += qty;
-      }
-      // Fallback: distribute flat_qty if all monthly values are zero
-      if (cyTotal === 0 && r.flat_qty) {
-        const perMonth = Math.round(r.flat_qty / 12);
-        for (const m of FISCAL_MONTHS) cyMonths[m] = perMonth;
-        cyTotal = Number(r.flat_qty);
-      }
-
-      const lyMonths = lyLookup[`${emp}:${r.product_code}`] || {};
-      const lyTotal  = FISCAL_MONTHS.reduce((s, m) => s + (lyMonths[m] || 0), 0);
-
-      empMap[emp].products.push({
-        productCode:  r.product_code,
-        productName:  r.product_display_name || r.product_code,
-        cyMonths,
-        lyMonths,
-        cyTotal,
-        lyTotal,
-      });
-    }
-
-    // Return only employees that have at least one product commitment
-    return Object.values(empMap).filter(e => e.products.length > 0);
   },
 };
 

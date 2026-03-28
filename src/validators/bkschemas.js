@@ -60,7 +60,7 @@ const bulkApproveSchema = Joi.object({
 const saveTerritoryTargetsSchema = Joi.object({
   targets: Joi.array().items(
     Joi.object({
-      id: Joi.number().integer().positive().required(),
+      id: Joi.alternatives().try(Joi.number().integer().positive(), Joi.string()).required(),
       monthlyTargets: monthlyTargetsSchema,
     })
   ).min(1).required(),

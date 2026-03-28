@@ -37,13 +37,13 @@ const TBMService = {
     if (filters.categoryId) query = query.where('pc.category_id', filters.categoryId);
     if (filters.salesRepId || filters.employeeCode) query = query.where('pc.employee_code', filters.salesRepId || filters.employeeCode);
 
-    const activeFy = await db('ts_fiscal_years').where('is_active', true).first();
-    if (activeFy) query = query.where('pc.fiscal_year_code', activeFy.code);
+    // CY is always FY26_27 — hardcoded to avoid active-flag ambiguity
+    query = query.where('pc.fiscal_year_code', 'FY26_27');
 
     const rows = await query
       .select(
         'pc.*',
-        'pm.product_name', 'pm.quota_price__c AS unit_cost',
+        'pm.product_name', 'pm.product_subgroup', 'pm.quota_price__c AS unit_cost',
         'u.full_name AS employee_name', 'u.role AS employee_role'
       )
       .orderBy('u.full_name').orderBy('pc.category_id').orderBy('pm.product_name');
@@ -55,7 +55,7 @@ const TBMService = {
       territory: r.territory_name,
       categoryId: r.category_id,
       subcategory: null,
-      name: r.product_name,
+      name: r.product_subgroup || r.product_name || r.product_code,
       code: r.product_code,
       status: r.status,
       submittedDate: r.submitted_at,
@@ -411,34 +411,37 @@ const TBMService = {
     return { success: true, savedCount, message: 'Territory targets saved' };
   },
 
-  async submitTerritoryTargets(targetIds, tbmUser) {
-    const commitments = await db('ts_product_commitments')
-      .whereIn('id', targetIds)
+  async submitTerritoryTargets(_targetIds, tbmUser) {
+    const tbmRow = await db('ts_auth_users')
       .where('employee_code', tbmUser.employeeCode)
-      .where('status', 'draft');
-
-    if (commitments.length === 0) {
-      throw Object.assign(new Error('No eligible draft targets found.'), { status: 400 });
+      .first();
+    const territoryCode = String(tbmRow?.territory_code || '');
+    if (!territoryCode) {
+      throw Object.assign(new Error('TBM territory not found.'), { status: 400 });
     }
 
-    const validIds = commitments.map((c) => c.id);
-    await db('ts_product_commitments')
-      .whereIn('id', validIds)
-      .update({ status: 'submitted', submitted_at: new Date() });
+    const draftRows = await db('ts_geography_targets')
+      .where({
+        geo_level: 'territory',
+        fiscal_year_code: 'FY26_27',
+        territory_code: territoryCode,
+        status: 'draft',
+      })
+      .select('id');
 
-    const approvalRows = validIds.map((id) => ({
-      commitment_id: id,
-      action: 'submitted',
-      actor_code: tbmUser.employeeCode,
+    if (draftRows.length === 0) {
+      throw Object.assign(new Error('No draft territory targets found. Please save targets first.'), { status: 400 });
+    }
 
-      actor_role: tbmUser.role,
-    }));
-    await db('ts_commitment_approvals').insert(approvalRows);
+    const ids = draftRows.map((r) => r.id);
+    await db('ts_geography_targets')
+      .whereIn('id', ids)
+      .update({ status: 'submitted', updated_at: new Date() });
 
     return {
       success: true,
-      submittedCount: validIds.length,
-      message: `${validIds.length} targets submitted for ABM approval`,
+      submittedCount: ids.length,
+      message: `${ids.length} territory targets submitted to ABM.`,
     };
   },
 

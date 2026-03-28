@@ -37,4 +37,6 @@ module.exports = {
   async setGeographyTargets(req, res, next) { try { res.json(await GeographyService.setGeographyTargets(req.body.geoLevel, req.body.geoCode, req.body.geoName, req.body.fiscalYear, req.body.targets, req.user.employeeCode)); } catch (err) { if (err.status) return res.status(err.status).json(errorResponse(err.message)); next(err); } },
 
   async getDashboardStats(req, res, next) { try { res.json(await AdminService.getDashboardStats()); } catch (err) { next(err); } },
+
+  async getTargetProgress(req, res, next) { try { res.json(await AdminService.getTargetProgress()); } catch (err) { next(err); } },
 };

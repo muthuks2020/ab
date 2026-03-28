@@ -40,4 +40,5 @@ router.get('/geography-targets', AdminController.getGeographyTargets);
 router.post('/geography-targets', validateBody(geographyTargetSchema), AdminController.setGeographyTargets);
 
 router.get('/dashboard-stats', AdminController.getDashboardStats);
+router.get('/target-progress', AdminController.getTargetProgress);
 module.exports = router;

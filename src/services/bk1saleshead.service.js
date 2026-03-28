@@ -106,120 +106,23 @@ const SalesHeadService = {
       return res.rows;
     };
 
-    const FISCAL_MONTHS = ['apr','may','jun','jul','aug','sep','oct','nov','dec','jan','feb','mar'];
-
     const getRepCommitments = async (empCode) => {
-      // ── Step 1: CY products (FY26_27) ────────────────────────────────────
-      // DISTINCT ON deduplicates commitments; inner subquery deduplicates product_master.
-      // COALESCE cascades through product_name → product_family → product_group → code
-      // so the UI always shows a human-readable label even when product_name is NULL.
-      // target_revenue/target_quantity are the flat fallback when monthly_targets JSONB
-      // is empty (rep submitted total but no monthly breakdown).
-      const cySql = `
-        SELECT DISTINCT ON (pc.product_code)
-          pc.id,
-          pc.product_code,
-          pc.monthly_targets,
-          pc.target_revenue   AS cy_flat_rev,
-          pc.target_quantity  AS cy_flat_qty,
-          pc.status,
-          COALESCE(NULLIF(TRIM(pm.product_name), ''), NULLIF(TRIM(pm.product_family), ''),
-                   NULLIF(TRIM(pm.product_group), ''), pc.product_code) AS product_name,
-          pm.product_category
-        FROM aop.ts_product_commitments AS pc
-        LEFT JOIN (
-          SELECT DISTINCT ON (productcode)
-            productcode, product_name, product_category, product_family, product_group
-          FROM aop.product_master
-          ORDER BY productcode
-        ) pm ON pm.productcode = pc.product_code
-        WHERE pc.employee_code = ?
-          AND pc.fiscal_year_code = 'FY26_27'
-        ORDER BY pc.product_code, pc.updated_at DESC
-      `;
-      const cyRes = await getKnex().raw(cySql, [empCode]);
-      console.log('[getRepCommitments] CY ' + empCode + ': ' + cyRes.rows.length + ' products');
-
-      // ── Step 2: LY products (FY25_26) ────────────────────────────────────
-      // FY25_26 monthly_targets JSONB is empty — real data lives in flat columns
-      // target_revenue / target_quantity. Distribute evenly across 12 months.
-      const lyRows = await db('ts_product_commitments')
-        .where({ employee_code: empCode, fiscal_year_code: 'FY25_26' })
-        .whereNotNull('product_code')
-        .select('product_code', 'target_revenue', 'target_quantity', 'monthly_targets');
-
-      // Build LY map: product_code → { lyRevPerMonth, lyQtyPerMonth }
-      const lyMap = {};
-      for (const r of lyRows) {
-        const code = r.product_code;
-        if (!lyMap[code]) lyMap[code] = { lyRevPerMonth: 0, lyQtyPerMonth: 0 };
-        // Check if JSONB has any real cyRev data (rare case where FY25_26 has JSONB)
-        const mt = r.monthly_targets || {};
-        const jsonbTotal = FISCAL_MONTHS.reduce((s, m) => s + (mt[m]?.cyRev || mt[m]?.lyRev || 0), 0);
-        if (jsonbTotal > 0) {
-          // Use JSONB — distribute its monthly values
-          FISCAL_MONTHS.forEach(m => {
-            lyMap[code].lyRevPerMonth += (mt[m]?.cyRev || mt[m]?.lyRev || 0) / 12;
-            lyMap[code].lyQtyPerMonth += (mt[m]?.cyQty || mt[m]?.lyQty || 0) / 12;
-          });
-        } else {
-          // Use flat columns distributed evenly across 12 months
-          lyMap[code].lyRevPerMonth += parseFloat(r.target_revenue || 0) / 12;
-          lyMap[code].lyQtyPerMonth += parseInt(r.target_quantity  || 0) / 12;
-        }
-      }
-
-      // ── Step 3: Merge CY + LY, then group by productName ────────────────
-      // Multiple product_codes can share the same resolved product_name
-      // (e.g. several Hydrophobic IOL SKUs all resolve to "Hydrophobic").
-      // We sum their monthly values into one row per unique name.
-      const nameMap = {}; // productName → accumulated entry
-
-      for (const r of cyRes.rows) {
-        const cyMt      = r.monthly_targets || {};
-        const cyFlatRev = parseFloat(r.cy_flat_rev || 0);
-        const cyFlatQty = parseInt(r.cy_flat_qty   || 0);
-        const ly        = lyMap[r.product_code] || { lyRevPerMonth: 0, lyQtyPerMonth: 0 };
-        const name      = r.product_name || r.product_code;
-
-        // Determine if JSONB has any CY monthly data for this row
-        const jsonbHasCyData = FISCAL_MONTHS.some(m => (cyMt[m]?.cyRev || 0) > 0);
-
-        if (!nameMap[name]) {
-          nameMap[name] = {
-            productId:      r.product_code, // first code wins as representative id
-            productName:    name,
-            category:       r.product_category,
-            status:         r.status,
-            monthlyTargets: {},
-          };
-          FISCAL_MONTHS.forEach(m => { nameMap[name].monthlyTargets[m] = { cyRev: 0, cyQty: 0, lyRev: 0, lyQty: 0 }; });
-        }
-
-        FISCAL_MONTHS.forEach(m => {
-          const cyMonth = cyMt[m] || {};
-          const entry   = nameMap[name].monthlyTargets[m];
-          entry.cyRev += cyMonth.cyRev || (!jsonbHasCyData ? cyFlatRev / 12 : 0);
-          entry.cyQty += cyMonth.cyQty || (!jsonbHasCyData ? cyFlatQty / 12 : 0);
-          entry.lyRev += ly.lyRevPerMonth;
-          entry.lyQty += ly.lyQtyPerMonth;
-        });
-      }
-
-      const products = Object.values(nameMap);
-
-      // ── Step 4: Sort — non-zero totals first, then zeros ─────────────────
-      return products.sort((a, b) => {
-        const sumA = FISCAL_MONTHS.reduce((s, m) =>
-          s + (a.monthlyTargets[m]?.lyRev || 0) + (a.monthlyTargets[m]?.cyRev || 0), 0);
-        const sumB = FISCAL_MONTHS.reduce((s, m) =>
-          s + (b.monthlyTargets[m]?.lyRev || 0) + (b.monthlyTargets[m]?.cyRev || 0), 0);
-        if (sumA > 0 && sumB === 0) return -1;
-        if (sumA === 0 && sumB > 0) return  1;
-        return sumB - sumA; // descending by total value among non-zeros
-      });
+      const rows = await db('ts_product_commitments AS pc')
+        .leftJoin('product_master AS pm', 'pm.productcode', 'pc.product_code')
+        .where('pc.employee_code', empCode)
+        .where('pc.fiscal_year_code', activeFy)
+        .select('pc.id', 'pc.product_code', 'pc.monthly_targets', 'pc.status',
+          'pm.product_name', 'pm.product_category');
+      return rows.map(r => ({
+        productId: r.product_code,
+        productName: r.product_name || r.product_code,
+        category: r.product_category,
+        status: r.status,
+        monthlyTargets: r.monthly_targets || {},
+      }));
     };
 
+    const ZBM_ROLES = ['zbm', 'zonal business manager', 'zonal_business_manager', 'zonal manager'];
     const ABM_ROLES = ['abm', 'area business manager', 'area_business_manager', 'area manager'];
     const TBM_ROLES = ['tbm', 'territory business manager', 'territory_business_manager', 'territory manager'];
     const SR_ROLES  = ['sales_rep', 'sales rep', 'sr', 'sales representative', 'sales_representative',
@@ -235,24 +138,25 @@ const SalesHeadService = {
     const zbmRows = shDirectReports;
     console.log('[getZbmHierarchy] ZBMs found:', zbmRows.length);
 
-    // ── Build hierarchy skeleton with parallel queries ────────────────────
-    // All levels use Promise.all so sibling nodes load concurrently instead
-    // of waiting one-by-one — this alone cuts load time significantly.
-    const result = await Promise.all(zbmRows.map(async (zbm) => {
+    const result = [];
+    for (const zbm of zbmRows) {
       const abmRows = await getDirectReports(zbm.employee_code);
       console.log(`[getZbmHierarchy] ZBM ${zbm.employee_code} ABMs:`, abmRows.length);
 
-      const abms = await Promise.all(abmRows.filter(r => isRole(r.role, ABM_ROLES)).map(async (abm) => {
+      const abms = [];
+      for (const abm of abmRows.filter(r => isRole(r.role, ABM_ROLES))) {
         const tbmRows = await getDirectReports(abm.employee_code);
         console.log(`[getZbmHierarchy] ABM ${abm.employee_code} TBMs:`, tbmRows.length);
 
-        const tbms = await Promise.all(tbmRows.filter(r => isRole(r.role, TBM_ROLES)).map(async (tbm) => {
+        const tbms = [];
+        for (const tbm of tbmRows.filter(r => isRole(r.role, TBM_ROLES))) {
           const srRows = await getDirectReports(tbm.employee_code);
           console.log(`[getZbmHierarchy] TBM ${tbm.employee_code} SRs:`, srRows.length);
 
-          const salesReps = await Promise.all(srRows.filter(r => isRole(r.role, SR_ROLES)).map(async (sr) => {
+          const salesReps = [];
+          for (const sr of srRows.filter(r => isRole(r.role, SR_ROLES))) {
             const products = await getRepCommitments(sr.employee_code);
-            return {
+            salesReps.push({
               id: sr.employee_code,
               employeeCode: sr.employee_code,
               name: sr.full_name,
@@ -261,13 +165,11 @@ const SalesHeadService = {
               territory: sr.territory_name || sr.area_name || sr.zone_name,
               code: sr.territory_code || '',
               zone: sr.zone_name,
-              lyTgt: 0,
-              lyAhv: 0,
               products,
-            };
-          }));
+            });
+          }
 
-          return {
+          tbms.push({
             id: tbm.employee_code,
             employeeCode: tbm.employee_code,
             name: tbm.full_name,
@@ -276,13 +178,11 @@ const SalesHeadService = {
             territory: tbm.area_name || tbm.zone_name,
             code: tbm.territory_code || tbm.area_code || '',
             zone: tbm.zone_name,
-            lyTgt: 0,
-            lyAhv: 0,
             salesReps,
-          };
-        }));
+          });
+        }
 
-        return {
+        abms.push({
           id: abm.employee_code,
           employeeCode: abm.employee_code,
           name: abm.full_name,
@@ -291,13 +191,11 @@ const SalesHeadService = {
           territory: abm.area_name || abm.zone_name,
           code: abm.area_code || '',
           zone: abm.zone_name,
-          lyTgt: 0,
-          lyAhv: 0,
           tbms,
-        };
-      }));
+        });
+      }
 
-      return {
+      result.push({
         id: zbm.employee_code,
         employeeCode: zbm.employee_code,
         name: zbm.full_name,
@@ -306,125 +204,12 @@ const SalesHeadService = {
         territory: zbm.zone_name,
         code: zbm.zone_code || '',
         zone: zbm.zone_name,
-        lyTgt: 0,
-        lyAhv: 0,
         abms,
-      };
-    }));
+      });
+    }
 
     console.log('[getZbmHierarchy] final result:', result.length, 'ZBMs');
-
-    // ── Bulk-attach LY Tgt / LY Ahv to every node (2 queries total) ──────
-    // Collect all employee codes across the entire hierarchy in one pass
-    const allCodes = [];
-    result.forEach(z => {
-      allCodes.push(z.employeeCode);
-      z.abms.forEach(a => {
-        allCodes.push(a.employeeCode);
-        a.tbms.forEach(t => {
-          allCodes.push(t.employeeCode);
-          t.salesReps.forEach(r => allCodes.push(r.employeeCode));
-        });
-      });
-    });
-
-    // Query 1: FY26_27 ly_target_value / ly_achieved_value (backfilled by each manager on save)
-    // Matches abm.service priority — FY26_27 ly columns first
-    const cyAssignRows = allCodes.length > 0
-      ? await db('ts_yearly_target_assignments')
-          .whereIn('assignee_code', allCodes)
-          .where('fiscal_year_code', 'FY26_27')
-          .select('assignee_code', 'ly_target_value', 'ly_achieved_value')
-      : [];
-
-    const lyMap = {};
-    for (const r of cyAssignRows) {
-      if (!lyMap[r.assignee_code]) lyMap[r.assignee_code] = { lyTgt: 0, lyAhv: 0 };
-      lyMap[r.assignee_code].lyTgt += parseFloat(r.ly_target_value   || 0);
-      lyMap[r.assignee_code].lyAhv += parseFloat(r.ly_achieved_value || 0);
-    }
-
-    // Query 2: Fallback for any node with no FY26_27 ly data — use FY25_26 cy_target_value
-    const codesNoLyTgt = allCodes.filter(c => !(lyMap[c]?.lyTgt > 0));
-    if (codesNoLyTgt.length > 0) {
-      const lyAssignRows = await db('ts_yearly_target_assignments')
-        .whereIn('assignee_code', codesNoLyTgt)
-        .where('fiscal_year_code', 'FY25_26')
-        .select('assignee_code', 'cy_target_value', 'ly_achieved_value');
-      for (const r of lyAssignRows) {
-        if (!lyMap[r.assignee_code]) lyMap[r.assignee_code] = { lyTgt: 0, lyAhv: 0 };
-        lyMap[r.assignee_code].lyTgt += parseFloat(r.cy_target_value   || 0);
-        lyMap[r.assignee_code].lyAhv += parseFloat(r.ly_achieved_value || 0);
-      }
-    }
-
-    // Query 3: Fallback for ALL nodes still missing lyTgt — sum ts_product_commitments FY25_26
-    // Matches abm.service lyCommitMap: TBMs (and SRs) have commitment rows in FY25_26
-    const allCodesNoData = allCodes.filter(c => !(lyMap[c]?.lyTgt > 0));
-    if (allCodesNoData.length > 0) {
-      const commitRows = await db('ts_product_commitments')
-        .whereIn('employee_code', allCodesNoData)
-        .where('fiscal_year_code', 'FY25_26')
-        .select('employee_code')
-        .sum({ lyTgt: 'target_revenue' })
-        .groupBy('employee_code');
-      for (const r of commitRows) {
-        if (!lyMap[r.employee_code]) lyMap[r.employee_code] = { lyTgt: 0, lyAhv: 0 };
-        lyMap[r.employee_code].lyTgt += parseFloat(r.lyTgt || 0);
-      }
-    }
-
-    // Attach lyTgt/lyAhv to every node
-    const attachLy = (node) => {
-      const d = lyMap[node.employeeCode] || { lyTgt: 0, lyAhv: 0 };
-      node.lyTgt = d.lyTgt;
-      node.lyAhv = d.lyAhv;
-    };
-    result.forEach(z => {
-      attachLy(z);
-      z.abms.forEach(a => {
-        attachLy(a);
-        a.tbms.forEach(t => {
-          attachLy(t);
-          t.salesReps.forEach(r => attachLy(r));
-        });
-      });
-    });
-    // ── end bulk LY attachment ─────────────────────────────────────────────
-
     return result;
-  },
-
-  // Standalone method to fetch a single rep's product commitments.
-  // Used by GET /saleshead/rep-products/:employeeCode for on-demand loading.
-  async getRepProducts(empCode) {
-    const sql = `
-      SELECT DISTINCT ON (pc.product_code)
-        pc.id,
-        pc.product_code,
-        pc.monthly_targets,
-        pc.status,
-        pm.product_name,
-        pm.product_category
-      FROM aop.ts_product_commitments AS pc
-      LEFT JOIN (
-        SELECT DISTINCT ON (productcode)
-          productcode, product_name, product_category
-        FROM aop.product_master
-        ORDER BY productcode
-      ) pm ON pm.productcode = pc.product_code
-      WHERE pc.employee_code = ?
-        AND pc.fiscal_year_code = 'FY26_27'
-      ORDER BY pc.product_code, pc.updated_at DESC
-    `;
-    const res = await getKnex().raw(sql, [empCode]);
-    return res.rows.map(r => ({
-      productId:      r.product_code,
-      productName:    r.product_name || r.product_code,
-      category:       r.product_category,
-      status:         r.status,
-      monthlyTargets: r.monthly_targets || {},
-    }));
   },
 
   async getTeamMembers(shEmployeeCode) {
@@ -492,8 +277,8 @@ const SalesHeadService = {
         fullName:      zbm.full_name,
         zone:          zbm.zone_name,
         designation:   zbm.designation,
-        lyTargetValue:   lyTargetValue,
-        lyAchievedValue: lyAchievedValue,
+        lyTarget:      lyTargetValue,
+        lyAchieved:    lyAchievedValue,
         cyTargetValue: parseFloat(assignment?.cy_target_value || 0),
         status:        assignment?.status || 'not_set',
         assignmentId:  assignment?.id || null,
@@ -663,154 +448,6 @@ const SalesHeadService = {
       result.push({ zoneCode: z.zone_code, zoneName: z.zone_name, total: parseInt(total.count), approved: parseInt(approved.count), achievementRate: parseInt(total.count) > 0 ? Math.round((parseInt(approved.count) / parseInt(total.count)) * 100) : 0 });
     }
     return result;
-  },
-
-  async getProductVisibility(level) {
-    const FISCAL_MONTHS = ['apr','may','jun','jul','aug','sep','oct','nov','dec','jan','feb','mar'];
-
-    // Map UI level key → role strings stored in ts_auth_users.role (matched LOWER TRIM)
-    const LEVEL_ROLES = {
-      zbm: ['zonal business manager', 'zbm', 'zonal_business_manager', 'zonal manager'],
-      abm: ['area business manager',  'abm', 'area_business_manager',  'area manager'],
-      tbm: ['territory business manager', 'tbm', 'territory_business_manager', 'territory manager'],
-      rep: ['sales_rep', 'sales rep', 'sales representative', 'sales_representative',
-            'equipment specialist - surgical systems', 'equipment specialist- surgical systems'],
-    };
-    const roles = LEVEL_ROLES[level] || LEVEL_ROLES.rep;
-    const rolePlaceholders = roles.map(() => '?').join(', ');
-
-    // ── CY commitments (FY26_27) for all employees at this role ──────────
-    // DISTINCT ON (employee_code, product_code) deduplicates rows.
-    // COALESCE name chain: product_name → product_family → product_group → product_code.
-    const cySql = `
-      SELECT DISTINCT ON (pc.employee_code, pc.product_code)
-        pc.employee_code,
-        pc.product_code,
-        pc.monthly_targets,
-        pc.target_quantity  AS flat_qty,
-        u.full_name,
-        u.role              AS user_role,
-        u.zone_name,
-        u.area_name,
-        u.territory_name,
-        COALESCE(
-          NULLIF(TRIM(pm.product_name),''),
-          NULLIF(TRIM(pm.product_family),''),
-          NULLIF(TRIM(pm.product_group),''),
-          pc.product_code
-        ) AS product_display_name
-      FROM aop.ts_product_commitments pc
-      JOIN aop.ts_auth_users u
-        ON u.employee_code = pc.employee_code AND u.is_active = true
-      LEFT JOIN (
-        SELECT DISTINCT ON (productcode)
-          productcode, product_name, product_family, product_group
-        FROM aop.product_master
-        ORDER BY productcode
-      ) pm ON pm.productcode = pc.product_code
-      WHERE pc.fiscal_year_code = 'FY26_27'
-        AND LOWER(TRIM(u.role)) IN (${rolePlaceholders})
-      ORDER BY pc.employee_code, pc.product_code, pc.updated_at DESC
-    `;
-    const cyRes = await getKnex().raw(cySql, roles);
-    console.log(`[getProductVisibility] level=${level} CY rows: ${cyRes.rows.length}`);
-
-    // ── LY commitments (FY25_26) — monthly_targets JSONB is empty for FY25_26;
-    //    real data is in flat target_quantity column.
-    const lySql = `
-      SELECT DISTINCT ON (pc.employee_code, pc.product_code)
-        pc.employee_code,
-        pc.product_code,
-        pc.target_quantity  AS flat_qty,
-        pc.monthly_targets
-      FROM aop.ts_product_commitments pc
-      JOIN aop.ts_auth_users u
-        ON u.employee_code = pc.employee_code AND u.is_active = true
-      WHERE pc.fiscal_year_code = 'FY25_26'
-        AND LOWER(TRIM(u.role)) IN (${rolePlaceholders})
-      ORDER BY pc.employee_code, pc.product_code, pc.updated_at DESC
-    `;
-    const lyRes = await getKnex().raw(lySql, roles);
-
-    // Build LY lookup: "empCode:productCode" → { perMonth qty }
-    const lyLookup = {};
-    for (const r of lyRes.rows) {
-      const key = `${r.employee_code}:${r.product_code}`;
-      const mt  = r.monthly_targets || {};
-      let total = 0;
-      const months = {};
-      for (const m of FISCAL_MONTHS) {
-        const md  = mt[m];
-        let qty   = 0;
-        if (md && typeof md === 'object') {
-          qty = Number(md.lyQty || md.cyQty || md.qty || 0);
-        } else if (md != null) {
-          qty = Number(md || 0);
-        }
-        months[m] = qty;
-        total += qty;
-      }
-      // If JSONB is all zeros, distribute flat_qty evenly across 12 months
-      if (total === 0 && r.flat_qty) {
-        const perMonth = Math.round(r.flat_qty / 12);
-        for (const m of FISCAL_MONTHS) months[m] = perMonth;
-      }
-      lyLookup[key] = months;
-    }
-
-    // ── Group CY rows by employee ─────────────────────────────────────────
-    const empMap = {};
-    for (const r of cyRes.rows) {
-      const emp = r.employee_code;
-      if (!empMap[emp]) {
-        empMap[emp] = {
-          employeeCode:  emp,
-          fullName:      r.full_name,
-          role:          r.user_role,
-          zoneName:      r.zone_name      || null,
-          areaName:      r.area_name      || null,
-          territoryName: r.territory_name || null,
-          products:      [],
-        };
-      }
-
-      // Extract CY monthly qty
-      const mt = r.monthly_targets || {};
-      const cyMonths = {};
-      let cyTotal = 0;
-      for (const m of FISCAL_MONTHS) {
-        const md  = mt[m];
-        let qty   = 0;
-        if (md && typeof md === 'object') {
-          qty = Number(md.cyQty || md.qty || 0);
-        } else if (md != null) {
-          qty = Number(md || 0);
-        }
-        cyMonths[m] = qty;
-        cyTotal    += qty;
-      }
-      // Fallback: distribute flat_qty if all monthly values are zero
-      if (cyTotal === 0 && r.flat_qty) {
-        const perMonth = Math.round(r.flat_qty / 12);
-        for (const m of FISCAL_MONTHS) cyMonths[m] = perMonth;
-        cyTotal = Number(r.flat_qty);
-      }
-
-      const lyMonths = lyLookup[`${emp}:${r.product_code}`] || {};
-      const lyTotal  = FISCAL_MONTHS.reduce((s, m) => s + (lyMonths[m] || 0), 0);
-
-      empMap[emp].products.push({
-        productCode:  r.product_code,
-        productName:  r.product_display_name || r.product_code,
-        cyMonths,
-        lyMonths,
-        cyTotal,
-        lyTotal,
-      });
-    }
-
-    // Return only employees that have at least one product commitment
-    return Object.values(empMap).filter(e => e.products.length > 0);
   },
 };
 

@@ -31,4 +31,5 @@ router.post('/geography-targets', validateBody(geographyTargetSchema), SalesHead
 router.get('/analytics/distribution', SalesHeadController.getAnalyticsDistribution);
 router.get('/analytics/comparison', SalesHeadController.getAnalyticsComparison);
 router.get('/analytics/achievement', SalesHeadController.getAnalyticsAchievement);
+router.get('/product-visibility', SalesHeadController.getProductVisibility);
 module.exports = router;

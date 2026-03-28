@@ -290,6 +290,81 @@ const AdminService = {
     return { success: true, activatedFY: fyCode };
   },
 
+  async getTargetProgress() {
+    const FY = 'FY26_27';
+
+    // ── Pending approvals: commitments submitted but not yet approved ─────────
+    const pendingApprovalRow = await db('ts_product_commitments')
+      .where({ fiscal_year_code: FY, status: 'submitted' })
+      .countDistinct('employee_code as count')
+      .first();
+    const pendingApprovals = parseInt(pendingApprovalRow?.count || 0);
+
+    // ── Per-employee target status: one row per assignee, best status wins ──
+    // Uses DISTINCT ON to collapse multiple manager assignments per user.
+    const result = await getKnex().raw(`
+      SELECT DISTINCT ON (u.employee_code)
+        u.employee_code,
+        u.full_name,
+        u.designation,
+        u.role,
+        u.zone_code,
+        u.zone_name,
+        u.area_code,
+        u.area_name,
+        u.territory_code,
+        u.territory_name,
+        u.reports_to,
+        m.full_name         AS manager_name,
+        m.designation       AS manager_designation,
+        yta.cy_target_value,
+        yta.status,
+        yta.updated_at
+      FROM   aop.ts_auth_users u
+      LEFT   JOIN aop.ts_yearly_target_assignments yta
+             ON  yta.assignee_code    = u.employee_code
+             AND yta.fiscal_year_code = ?
+      LEFT   JOIN aop.ts_auth_users m ON m.employee_code = u.reports_to
+      WHERE  u.is_active  = TRUE
+        AND  u.is_vacant  = FALSE
+        AND  u.role NOT IN ('admin')
+      ORDER  BY u.employee_code,
+                CASE yta.status
+                  WHEN 'published' THEN 1
+                  WHEN 'draft'     THEN 2
+                  ELSE 3
+                END
+    `, [FY]);
+
+    const rows = result.rows.map((r) => ({
+      employeeCode       : r.employee_code,
+      fullName           : r.full_name,
+      designation        : r.designation,
+      role               : r.role,
+      zoneCode           : r.zone_code,
+      zoneName           : r.zone_name,
+      areaCode           : r.area_code,
+      areaName           : r.area_name,
+      territoryCode      : r.territory_code,
+      territoryName      : r.territory_name,
+      managerName        : r.manager_name        || '—',
+      managerDesignation : r.manager_designation || '—',
+      cyTargetValue      : r.cy_target_value ? parseFloat(r.cy_target_value) : null,
+      status             : r.status || 'not_set',
+      updatedAt          : r.updated_at || null,
+    }));
+
+    const total     = rows.length;
+    const entered   = rows.filter((r) => r.status !== 'not_set').length;
+    const frozen    = rows.filter((r) => r.status === 'published').length;
+    const notSet    = rows.filter((r) => r.status === 'not_set').length;
+
+    return {
+      summary: { total, entered, frozen, notSet, pendingApprovals },
+      rows,
+    };
+  },
+
   async getDashboardStats() {
     const activeFy = await getActiveFY();
     const totalUsers = await db('ts_auth_users').where('is_active', true).count('id as count').first();

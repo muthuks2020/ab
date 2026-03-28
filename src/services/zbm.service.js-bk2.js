@@ -283,11 +283,10 @@ const ZBMService = {
     if (filters.status) {
       query = query.where('gt.status', filters.status);
     } else {
-      // Include draft so ZBM sees what ABM has entered even before submission
-      query = query.whereIn('gt.status', ['draft', 'submitted', 'approved', 'published']);
+      query = query.whereIn('gt.status', ['submitted', 'approved']);
     }
 
-    // Filter by specific ABM's area_code if abmId (employee_code) is provided
+    // Filter by specific ABM if requested (abmId = employee_code)
     if (filters.abmId) {
       const abm = directAbms.find((a) => a.employee_code === filters.abmId);
       if (abm?.area_code) query = query.where('gt.area_code', String(abm.area_code));
@@ -307,8 +306,6 @@ const ZBMService = {
         'gt.updated_at',
         'pm.product_name',
         'pm.product_category',
-        'pm.product_group',
-        'pm.product_family',
         'pm.quota_price__c AS unit_cost',
         getKnex().raw('pm.product_subgroup AS product_subgroup')
       )
@@ -339,13 +336,8 @@ const ZBMService = {
         abmName:         abmInfo.abmName || '',
         productCode:     r.product_code,
         productName:     r.product_name || r.product_subgroup || r.product_code,
-        name:            r.product_name || r.product_subgroup || r.product_code,
         productCategory: r.product_category || '',
-        // Use product_category from product_master as fallback when category_id is null
-        categoryId:      r.category_id || r.product_category || '',
-        productGroup:    r.product_group  || '',
-        productFamily:   r.product_family || '',
-        productSubgroup: r.product_subgroup || '',
+        categoryId:      r.category_id || '',
         unitCost:        parseFloat(r.unit_cost || 0),
         status:          r.status || 'draft',
         monthlyTargets,
@@ -361,8 +353,11 @@ const ZBMService = {
   async approveAbm(commitmentId, zbmUser, { comments = '', corrections = null } = {}) {
     const row = await db('ts_geography_targets').where({ id: commitmentId }).first();
     if (!row) throw Object.assign(new Error('Submission not found.'), { status: 404 });
-    if (row.status === 'approved')
-      throw Object.assign(new Error('Already approved.'), { status: 400 });
+    if (row.status !== 'submitted')
+      throw Object.assign(
+        new Error(`Can only approve 'submitted'. Current: '${row.status}'.`),
+        { status: 400 }
+      );
     const now = new Date();
     let action = 'approved';
     if (corrections && Object.keys(corrections).length > 0) {
@@ -386,9 +381,9 @@ const ZBMService = {
   async rejectAbm(commitmentId, zbmUser, reason = '') {
     const row = await db('ts_geography_targets').where({ id: commitmentId }).first();
     if (!row) throw Object.assign(new Error('Submission not found.'), { status: 404 });
-    if (['draft', 'approved'].includes(row.status))
+    if (row.status !== 'submitted')
       throw Object.assign(
-        new Error(`Cannot reject. Current status: '${row.status}'.`),
+        new Error(`Can only reject 'submitted'. Current: '${row.status}'.`),
         { status: 400 }
       );
     await db('ts_geography_targets').where({ id: commitmentId }).update({
@@ -405,8 +400,7 @@ const ZBMService = {
 
     const rows = await db('ts_geography_targets')
       .whereIn('id', submissionIds)
-      .whereIn('status', ['draft', 'submitted', 'published'])
-      .where({ geo_level: 'area' })
+      .where({ status: 'submitted', geo_level: 'area' })
       .whereIn('area_code', areaCodes);
 
     if (rows.length === 0)
@@ -644,7 +638,7 @@ const ZBMService = {
       totalAbms:        directAbms.length,
       totalCommitments: geoRows.length,
       pending:          geoRows.filter((r) => r.status === 'submitted').length,
-      approved:         geoRows.filter((r) => ['approved', 'published'].includes(r.status)).length,
+      approved:         geoRows.filter((r) => r.status === 'approved').length,
       draft:            geoRows.filter((r) => r.status === 'draft').length,
       revGrowth:        0,
       qtyGrowth:        0,

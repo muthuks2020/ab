@@ -31,4 +31,14 @@ module.exports = {
       next(err);
     }
   },
+
+  async submitAreaTargets(req, res, next) {
+    try {
+      const result = await ABMAreaTargetsService.submitAreaTargets(req.user);
+      res.json(result);
+    } catch (err) {
+      if (err.status) return res.status(err.status).json({ success: false, message: err.message });
+      next(err);
+    }
+  },
 };

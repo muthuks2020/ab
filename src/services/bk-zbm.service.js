@@ -252,171 +252,117 @@ async function buildAbmDrilldown(abm, activeFy) {
 const ZBMService = {
 
   // GET /zbm/abm-submissions
-  // Reads from ts_geography_targets (area level) — ABMs save their area targets there.
   async getAbmSubmissions(zbmEmployeeCode, filters = {}) {
-    const directAbms = await getAbmSubordinates(zbmEmployeeCode);
-    if (directAbms.length === 0) return [];
+    const subs = await getAllSubordinatesUnderZbm(zbmEmployeeCode);
+    const subCodes = subs.map((r) => r.employee_code);
+    if (subCodes.length === 0) return [];
 
-    // Map area_code → { abmCode, abmName } for tagging each returned row
-    const areaToAbmMap = {};
-    directAbms.forEach((abm) => {
-      if (abm.area_code) {
-        areaToAbmMap[String(abm.area_code)] = {
-          abmCode: abm.employee_code,
-          abmName: abm.full_name,
-          abmArea: abm.area_name || '',
-        };
-      }
-    });
-
-    const areaCodes = directAbms.map((a) => String(a.area_code)).filter(Boolean);
-    if (areaCodes.length === 0) return [];
-
-    const fy = filters.fy || 'FY26_27';
-
-    let query = db('ts_geography_targets AS gt')
-      .join('product_master AS pm', 'pm.productcode', 'gt.product_code')
-      .where('gt.geo_level', 'area')
-      .where('gt.fiscal_year_code', fy)
-      .whereIn('gt.area_code', areaCodes);
+    const activeFy = filters.fy || (await getActiveFY());
+    let query = db('ts_product_commitments AS pc')
+      .join('product_master AS pm', 'pm.productcode', 'pc.product_code')
+      .leftJoin('ts_auth_users AS u', 'u.employee_code', 'pc.employee_code')
+      .whereIn('pc.employee_code', subCodes)
+      .where('pc.fiscal_year_code', activeFy);
 
     if (filters.status) {
-      query = query.where('gt.status', filters.status);
+      query = query.where('pc.status', filters.status);
     } else {
-      // Include draft so ZBM sees what ABM has entered even before submission
-      query = query.whereIn('gt.status', ['draft', 'submitted', 'approved', 'published']);
-    }
-
-    // Filter by specific ABM's area_code if abmId (employee_code) is provided
-    if (filters.abmId) {
-      const abm = directAbms.find((a) => a.employee_code === filters.abmId);
-      if (abm?.area_code) query = query.where('gt.area_code', String(abm.area_code));
+      query = query.whereIn('pc.status', ['submitted', 'approved']);
     }
 
     const rows = await query
       .select(
-        'gt.id',
-        'gt.product_code',
-        'gt.area_code',
-        'gt.area_name',
-        'gt.category_id',
-        'gt.monthly_targets',
-        'gt.status',
-        'gt.set_by_code',
-        'gt.created_at',
-        'gt.updated_at',
+        'pc.*',
         'pm.product_name',
         'pm.product_category',
-        'pm.product_group',
-        'pm.product_family',
         'pm.quota_price__c AS unit_cost',
-        getKnex().raw('pm.product_subgroup AS product_subgroup')
+        'u.full_name AS employee_name',
+        getKnex().raw("u.role::text AS employee_role")
       )
-      .orderBy('gt.area_code')
+      .orderBy('u.full_name')
       .orderBy('pm.product_name');
 
-    return rows.map((r) => {
-      const abmInfo = areaToAbmMap[String(r.area_code)] || {};
-      const mt = r.monthly_targets || {};
-      const monthlyTargets = {};
-      for (const m of FISCAL_MONTHS) {
-        monthlyTargets[m] = {
-          cyQty:    Number(mt[m]?.cyQty    || 0),
-          cyRev:    Number(mt[m]?.cyRev    || 0),
-          lyQty:    Number(mt[m]?.lyQty    || 0),
-          lyRev:    Number(mt[m]?.lyRev    || 0),
-          lyAchRev: Number(mt[m]?.lyAchRev || 0),
-          cyAchRev: Number(mt[m]?.cyAchRev || 0),
-          aopQty:   Number(mt[m]?.aopQty   || 0),
-        };
-      }
-      return {
-        id:              r.id,
-        employee_code:   abmInfo.abmCode || r.set_by_code || '',
-        employeeCode:    abmInfo.abmCode || r.set_by_code || '',
-        employeeName:    abmInfo.abmName || '',
-        abmCode:         abmInfo.abmCode || '',
-        abmName:         abmInfo.abmName || '',
-        productCode:     r.product_code,
-        productName:     r.product_name || r.product_subgroup || r.product_code,
-        name:            r.product_name || r.product_subgroup || r.product_code,
-        productCategory: r.product_category || '',
-        // Use product_category from product_master as fallback when category_id is null
-        categoryId:      r.category_id || r.product_category || '',
-        productGroup:    r.product_group  || '',
-        productFamily:   r.product_family || '',
-        productSubgroup: r.product_subgroup || '',
-        unitCost:        parseFloat(r.unit_cost || 0),
-        status:          r.status || 'draft',
-        monthlyTargets,
-        fiscalYearCode:  fy,
-        areaCode:        r.area_code,
-        areaName:        r.area_name || abmInfo.abmArea || '',
-      };
-    });
+    return rows.map(formatCommitment);
   },
 
   // PUT /zbm/approve-abm/:id
-  // Approves a row in ts_geography_targets (area-level ABM submission).
   async approveAbm(commitmentId, zbmUser, { comments = '', corrections = null } = {}) {
-    const row = await db('ts_geography_targets').where({ id: commitmentId }).first();
-    if (!row) throw Object.assign(new Error('Submission not found.'), { status: 404 });
-    if (row.status === 'approved')
-      throw Object.assign(new Error('Already approved.'), { status: 400 });
+    const commitment = await db('ts_product_commitments').where({ id: commitmentId }).first();
+    if (!commitment) throw Object.assign(new Error('Commitment not found.'), { status: 404 });
+    if (commitment.status !== 'submitted')
+      throw Object.assign(
+        new Error(`Can only approve 'submitted'. Current: '${commitment.status}'.`),
+        { status: 400 }
+      );
     const now = new Date();
     let action = 'approved';
+    let originalValues = null;
     if (corrections && Object.keys(corrections).length > 0) {
-      const updated = { ...(row.monthly_targets || {}) };
+      originalValues = { ...commitment.monthly_targets };
+      const updated = { ...commitment.monthly_targets };
       for (const [month, values] of Object.entries(corrections)) {
         if (updated[month]) updated[month] = { ...updated[month], ...values };
       }
-      await db('ts_geography_targets')
+      await db('ts_product_commitments')
         .where({ id: commitmentId })
-        .update({ monthly_targets: JSON.stringify(updated), updated_at: now });
+        .update({ monthly_targets: JSON.stringify(updated) });
       action = 'corrected_and_approved';
     }
-    await db('ts_geography_targets').where({ id: commitmentId }).update({
-      status: 'approved', updated_at: now,
+    await db('ts_product_commitments').where({ id: commitmentId }).update({
+      status: 'approved', approved_at: now, approved_by_code: zbmUser.employeeCode,
+    });
+    await db('ts_commitment_approvals').insert({
+      commitment_id: commitmentId, action,
+      actor_code: zbmUser.employeeCode, actor_role: zbmUser.role,
+      corrections: corrections ? JSON.stringify(corrections) : null,
+      original_values: originalValues ? JSON.stringify(originalValues) : null,
+      comments,
     });
     return { success: true, submissionId: commitmentId, action };
   },
 
   // PUT /zbm/reject-abm/:id
-  // Rejects (reverts to draft) a row in ts_geography_targets.
   async rejectAbm(commitmentId, zbmUser, reason = '') {
-    const row = await db('ts_geography_targets').where({ id: commitmentId }).first();
-    if (!row) throw Object.assign(new Error('Submission not found.'), { status: 404 });
-    if (['draft', 'approved'].includes(row.status))
+    const commitment = await db('ts_product_commitments').where({ id: commitmentId }).first();
+    if (!commitment) throw Object.assign(new Error('Commitment not found.'), { status: 404 });
+    if (commitment.status !== 'submitted')
       throw Object.assign(
-        new Error(`Cannot reject. Current status: '${row.status}'.`),
+        new Error(`Can only reject 'submitted'. Current: '${commitment.status}'.`),
         { status: 400 }
       );
-    await db('ts_geography_targets').where({ id: commitmentId }).update({
+    await db('ts_product_commitments').where({ id: commitmentId }).update({
       status: 'draft', updated_at: new Date(),
+    });
+    await db('ts_commitment_approvals').insert({
+      commitment_id: commitmentId, action: 'rejected',
+      actor_code: zbmUser.employeeCode, actor_role: zbmUser.role, comments: reason,
     });
     return { success: true, submissionId: commitmentId, action: 'rejected' };
   },
 
   // POST /zbm/bulk-approve-abm
-  // Bulk-approves rows in ts_geography_targets belonging to this ZBM's ABMs.
   async bulkApproveAbm(submissionIds, zbmUser, comments = '') {
-    const directAbms = await getAbmSubordinates(zbmUser.employeeCode);
-    const areaCodes = directAbms.map((a) => String(a.area_code)).filter(Boolean);
-
-    const rows = await db('ts_geography_targets')
+    const subs = await getSubordinates(zbmUser.employeeCode);
+    const subCodes = subs
+      .filter((r) => r.employee_code !== zbmUser.employeeCode)
+      .map((r) => r.employee_code);
+    const commitments = await db('ts_product_commitments')
       .whereIn('id', submissionIds)
-      .whereIn('status', ['draft', 'submitted', 'published'])
-      .where({ geo_level: 'area' })
-      .whereIn('area_code', areaCodes);
-
-    if (rows.length === 0)
+      .where('status', 'submitted')
+      .whereIn('employee_code', subCodes);
+    if (commitments.length === 0)
       throw Object.assign(new Error('No eligible submissions.'), { status: 400 });
-
-    const ids = rows.map((r) => r.id);
+    const ids = commitments.map((c) => c.id);
     const now = new Date();
-    await db('ts_geography_targets').whereIn('id', ids).update({
-      status: 'approved', updated_at: now,
+    await db('ts_product_commitments').whereIn('id', ids).update({
+      status: 'approved', approved_at: now, approved_by_code: zbmUser.employeeCode,
     });
+    await db('ts_commitment_approvals').insert(
+      ids.map((id) => ({
+        commitment_id: id, action: 'bulk_approved',
+        actor_code: zbmUser.employeeCode, actor_role: zbmUser.role, comments,
+      }))
+    );
     return { success: true, approvedCount: ids.length };
   },
 
@@ -629,25 +575,27 @@ const ZBMService = {
   },
 
   // GET /zbm/dashboard-stats
-  // Counts from ts_geography_targets (area level) — reflects ABM area target submissions.
   async getDashboardStats(zbmEmployeeCode) {
+    const activeFy = await getActiveFY();
+    const subs = await getAllSubordinatesUnderZbm(zbmEmployeeCode);
+    const subCodes = subs.map((r) => r.employee_code);
+    const allCodes = [...subCodes, zbmEmployeeCode];
+    const commitments =
+      allCodes.length > 0
+        ? await db('ts_product_commitments')
+            .whereIn('employee_code', allCodes)
+            .where('fiscal_year_code', activeFy)
+        : [];
+    const totals = aggregateMonthlyTargets(commitments);
     const directAbms = await getAbmSubordinates(zbmEmployeeCode);
-    const areaCodes = directAbms.map((a) => String(a.area_code)).filter(Boolean);
-
-    const geoRows = areaCodes.length > 0
-      ? await db('ts_geography_targets')
-          .where({ geo_level: 'area', fiscal_year_code: 'FY26_27' })
-          .whereIn('area_code', areaCodes)
-      : [];
-
     return {
       totalAbms:        directAbms.length,
-      totalCommitments: geoRows.length,
-      pending:          geoRows.filter((r) => r.status === 'submitted').length,
-      approved:         geoRows.filter((r) => ['approved', 'published'].includes(r.status)).length,
-      draft:            geoRows.filter((r) => r.status === 'draft').length,
-      revGrowth:        0,
-      qtyGrowth:        0,
+      totalCommitments: commitments.length,
+      pending:          commitments.filter((c) => c.status === 'submitted').length,
+      approved:         commitments.filter((c) => c.status === 'approved').length,
+      draft:            commitments.filter((c) => c.status === 'draft').length,
+      revGrowth:        calcGrowth(totals.lyRev, totals.cyRev),
+      qtyGrowth:        calcGrowth(totals.lyQty, totals.cyQty),
     };
   },
 

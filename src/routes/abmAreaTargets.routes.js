@@ -18,7 +18,8 @@ const { authorize }    = require('../middleware/authorize');
 router.use(authenticate);
 router.use(authorize('abm'));
 
-router.get('/area-targets-v2',       controller.getAreaTargets);
-router.post('/area-targets-v2/save', controller.saveAreaTargets);
+router.get('/area-targets-v2',        controller.getAreaTargets);
+router.post('/area-targets-v2/save',   controller.saveAreaTargets);
+router.post('/area-targets-v2/submit', controller.submitAreaTargets);
 
 module.exports = router;

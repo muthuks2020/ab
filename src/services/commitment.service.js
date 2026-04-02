@@ -1,6 +1,17 @@
 const { db } = require('../config/database');
 const { formatCommitment, aggregateMonthlyTargets, calcGrowth, MONTHS } = require('../utils/helpers');
 
+// Maps req.user.role (role_code from authenticate middleware) to product_master.product_category values.
+// Case-insensitive match used in query. Add new specialist roles here as needed.
+const SPECIALIST_ROLE_CATEGORIES = {
+  eq_spec_diagnostic: ['equipment'],
+  eq_mgr_diagnostic:  ['equipment'],
+  eq_spec_surgical:   ['equipment'],
+  eq_mgr_surgical:    ['equipment'],
+  at_iol_specialist:  ['iol'],
+  at_iol_manager:     ['iol'],
+};
+
 const CommitmentService = {
 
   async updateMonthlyTarget(commitmentId, month, data, user) {
@@ -20,7 +31,7 @@ const CommitmentService = {
     return { success: true, productId: commitmentId, month, data };
   },
 
-  async getProducts(employeeCode, fiscalYearCode) {
+  async getProducts(employeeCode, fiscalYearCode, userRole) {
     const activeFy = fiscalYearCode || 'FY26_27';
 
     // Include active_from/active_to so frontend can grey pre-start months
@@ -49,9 +60,47 @@ const CommitmentService = {
       activeTo:   toDate(r.active_to),
     }));
 
+    // ── Specialist role catalog stubs ────────────────────────────────────────
+    // Specialist users (equipment/IOL) may have no commitment rows yet because
+    // their products are regular catalog entries without active_from set.
+    // Inject all matching product_master rows as stubs based on role_code so
+    // the Target Entry Grid is populated on their first login.
+    const existingCodes = new Set(rows.map((r) => r.product_code));
+    const allowedCategories = userRole ? (SPECIALIST_ROLE_CATEGORIES[userRole] || null) : null;
+
+    if (allowedCategories && allowedCategories.length > 0) {
+      const specialistCatalogRows = await db('product_master')
+        .where('isactive', true)
+        .whereIn(db.raw('LOWER(product_category)'), allowedCategories)
+        .distinctOn('productcode')
+        .select('productcode', 'product_subgroup', 'product_name', 'product_category',
+                'product_family', 'product_group', 'quota_price__c AS unit_cost',
+                'active_from', 'active_to')
+        .orderBy('productcode');
+
+      for (const p of specialistCatalogRows) {
+        if (!existingCodes.has(p.productcode)) {
+          existingCodes.add(p.productcode);  // prevent duplication with AOP stubs below
+          commitmentProducts.push({
+            id:             p.productcode,
+            productCode:    p.productcode,
+            productName:    p.product_subgroup || p.product_name || p.productcode,
+            categoryId:     (p.product_category || '').toLowerCase(),
+            subcategory:    p.product_family  || '',
+            unitCost:       parseFloat(p.unit_cost || 0),
+            monthlyTargets: {},
+            status:         'not_started',
+            activeFrom:     toDate(p.active_from),
+            activeTo:       toDate(p.active_to),
+            isNewProduct:   true,
+          });
+        }
+      }
+      console.log('[getProducts] specialist role=' + userRole + ' categories=' + JSON.stringify(allowedCategories) + ' stubs=' + specialistCatalogRows.length);
+    }
+
     // AOP-created products (active_from IS NOT NULL) not yet in commitments:
     // show as stubs so sales rep can enter targets from their start month.
-    const existingCodes = new Set(rows.map((r) => r.product_code));
     const aopRows = await db('product_master')
       .where('isactive', true)
       .whereNotNull('active_from')
@@ -67,7 +116,7 @@ const CommitmentService = {
         id:           p.productcode,   // string productcode — saveAll handles this
         productCode:  p.productcode,
         productName:  p.product_subgroup || p.product_name || '',
-        categoryId:   p.product_category,
+        categoryId:   (p.product_category || '').toLowerCase(),
         subcategory:  p.product_family  || '',
         unitCost:     parseFloat(p.unit_cost || 0),
         monthlyTargets: {},
@@ -76,6 +125,86 @@ const CommitmentService = {
         activeTo:     toDate(p.active_to),
         isNewProduct: true,
       }));
+
+    // ── Full catalog stubs for regular sales reps ────────────────────────────────
+    // Specialist roles already get their category-filtered stubs above.
+    // Regular sales reps (no allowedCategories) must see ALL active products even
+    // if no FY26_27 commitment row exists yet. Inject stubs for any product not
+    // already covered by commitment rows, specialist stubs, or AOP stubs.
+    if (!allowedCategories) {
+      const allCoveredCodes = new Set([
+        ...existingCodes,
+        ...stubProducts.map((p) => p.productCode),
+      ]);
+
+      const catalogRows = await db('product_master')
+        .where('isactive', true)
+        .whereNull('active_from')          // AOP products already handled above
+        .distinctOn('productcode')
+        .select('productcode', 'product_subgroup', 'product_name', 'product_category',
+                'product_family', 'quota_price__c AS unit_cost')
+        .orderBy('productcode');
+
+      for (const p of catalogRows) {
+        if (!allCoveredCodes.has(p.productcode)) {
+          allCoveredCodes.add(p.productcode);
+          stubProducts.push({
+            id:             p.productcode,
+            productCode:    p.productcode,
+            productName:    p.product_subgroup || p.product_name || p.productcode,
+            categoryId:     (p.product_category || '').toLowerCase(),
+            subcategory:    p.product_family || '',
+            unitCost:       parseFloat(p.unit_cost || 0),
+            monthlyTargets: {},
+            status:         'not_started',
+            activeFrom:     null,
+            activeTo:       null,
+            isNewProduct:   true,
+          });
+        }
+      }
+      console.log('[getProducts] catalog stubs injected for sales rep=' + employeeCode + ' count=' + catalogRows.length);
+    }
+
+    // ── Revenue-only category stubs ──────────────────────────────────────────────
+    // Revenue-only categories (e.g. MSI) have no per-product rows in product_master
+    // with active_from set, so they never appear as AOP stubs. If a rep has no
+    // existing commitment rows for such a category, catProducts in
+    // renderRevenueOnlyCategory becomes [], firstProduct = undefined, and the
+    // onChange guard `if (firstProduct)` silently blocks all keyboard input.
+    // Fix: for each revenue-only category with no products yet, inject one
+    // representative product_master entry as a stub so the input is bindable.
+    const revOnlyCats = await db('ts_product_categories')
+      .where({ is_active: true, is_revenue_only: true })
+      .select('id');
+
+    const allProductsSoFar = [...commitmentProducts, ...stubProducts];
+
+    for (const cat of revOnlyCats) {
+      const alreadyHasProduct = allProductsSoFar.some((p) => p.categoryId === cat.id);
+      if (!alreadyHasProduct) {
+        const firstPm = await db('product_master')
+          .where({ isactive: true })
+          .whereRaw('LOWER(product_category) = LOWER(?)', [cat.id])
+          .orderBy('productcode')
+          .first();
+        if (firstPm) {
+          stubProducts.push({
+            id:             firstPm.productcode,
+            productCode:    firstPm.productcode,
+            productName:    firstPm.product_subgroup || firstPm.product_name || cat.id,
+            categoryId:     cat.id,
+            subcategory:    firstPm.product_family  || '',
+            unitCost:       parseFloat(firstPm.quota_price__c || 0),
+            monthlyTargets: {},
+            status:         'not_started',
+            activeFrom:     null,
+            activeTo:       null,
+            isNewProduct:   true,
+          });
+        }
+      }
+    }
 
     return [...commitmentProducts, ...stubProducts];
   },
@@ -234,7 +363,11 @@ const CommitmentService = {
       for (const [month, data] of Object.entries(p.monthlyTargets || {})) {
         enrichedTargets[month] = {
           ...data,
-          cyRev: Math.round((data.cyQty || 0) * unitCost),
+          // For revenue-only products (unitCost=0, e.g. MSI): preserve the cyRev entered by the user.
+          // For qty-based products: recompute cyRev from cyQty × unitCost as normal.
+          cyRev: unitCost > 0
+            ? Math.round((data.cyQty || 0) * unitCost)
+            : Math.round(data.cyRev || 0),
         };
       }
 

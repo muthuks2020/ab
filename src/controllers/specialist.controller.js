@@ -4,7 +4,7 @@ const { errorResponse } = require('../utils/helpers');
 
 const SpecialistController = {
   async getProducts(req, res, next) {
-    try { res.json(await specialistService.getProducts(req.user.employeeCode, req.query.fy)); }
+    try { res.json(await specialistService.getProducts(req.user.employeeCode, req.query.fy, req.user.role)); }
     catch (err) { next(err); }
   },
   async saveProduct(req, res, next) {

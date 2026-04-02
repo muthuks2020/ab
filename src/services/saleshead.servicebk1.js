@@ -354,9 +354,7 @@ const SalesHeadService = {
       for (const r of lyAssignRows) {
         if (!lyMap[r.assignee_code]) lyMap[r.assignee_code] = { lyTgt: 0, lyAhv: 0 };
         lyMap[r.assignee_code].lyTgt += parseFloat(r.cy_target_value   || 0);
-        if (!(lyMap[r.assignee_code].lyAhv > 0)) {
-          lyMap[r.assignee_code].lyAhv += parseFloat(r.ly_achieved_value || 0);
-        }
+        lyMap[r.assignee_code].lyAhv += parseFloat(r.ly_achieved_value || 0);
       }
     }
 
@@ -393,6 +391,165 @@ const SalesHeadService = {
       });
     });
     // ── end bulk LY attachment ─────────────────────────────────────────────
+
+    // ══════════════════════════════════════════════════════════════════════
+    // Step 5: Populate ownMonths + aopEntered for every level
+    //
+    // REP   → ts_product_commitments  monthly_targets.cyQty / cyRev
+    // TBM   → ts_geography_targets    geo_level='territory'  (by territory_code)
+    // ABM   → ts_geography_targets    geo_level='area'       (by area_code)
+    // ZBM   → aggregated from their ABMs
+    //
+    // ts_geography_targets.monthly_targets JSONB may use either capitalized
+    // ('Apr') or lowercase ('apr') keys, and either plain numbers or
+    // { qty: N } objects — the helper monthQtySql handles all four cases.
+    // ══════════════════════════════════════════════════════════════════════
+
+    const MONTHS_CAP = ['Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec','Jan','Feb','Mar'];
+    const zeroMonths = () => FISCAL_MONTHS.reduce((a, m) => ({ ...a, [m]: 0 }), {});
+
+    // Helper: generates a SQL CASE expression that extracts monthly qty from
+    // JSONB regardless of key capitalisation or nesting style.
+    const monthQtySql = (capM, lcM) => `
+      CASE
+        WHEN jsonb_typeof(monthly_targets->'${capM}') = 'number'
+          THEN (monthly_targets->>'${capM}')::numeric
+        WHEN jsonb_typeof(monthly_targets->'${capM}') = 'object'
+          THEN COALESCE((monthly_targets->'${capM}'->>'qty')::numeric, 0)
+        WHEN jsonb_typeof(monthly_targets->'${lcM}') = 'number'
+          THEN (monthly_targets->>'${lcM}')::numeric
+        WHEN jsonb_typeof(monthly_targets->'${lcM}') = 'object'
+          THEN COALESCE((monthly_targets->'${lcM}'->>'qty')::numeric, 0)
+        ELSE 0
+      END`;
+
+    // Collect rep codes and geo-level codes from the hierarchy
+    const allRepCodes    = [];
+    const tbmTerrLookup  = {}; // empCode → territory_code
+    const abmAreaLookup  = {}; // empCode → area_code
+
+    result.forEach(z => {
+      z.abms.forEach(a => {
+        if (a.code) abmAreaLookup[a.employeeCode] = a.code;
+        a.tbms.forEach(t => {
+          if (t.code) tbmTerrLookup[t.employeeCode] = t.code;
+          t.salesReps.forEach(r => allRepCodes.push(r.employeeCode));
+        });
+      });
+    });
+
+    // ── A) REP ownMonths from ts_product_commitments ─────────────────────
+    const repMonthData = {}; // empCode → { months, rev }
+    if (allRepCodes.length > 0) {
+      const repCommitRows = await db('ts_product_commitments')
+        .whereIn('employee_code', allRepCodes)
+        .where('fiscal_year_code', 'FY26_27')
+        .select('employee_code', 'monthly_targets', 'target_quantity', 'target_revenue');
+
+      for (const r of repCommitRows) {
+        const ec = r.employee_code;
+        if (!repMonthData[ec]) repMonthData[ec] = { months: zeroMonths(), rev: 0 };
+        const mt = r.monthly_targets || {};
+        const hasMt = FISCAL_MONTHS.some(m => (mt[m]?.cyQty || 0) > 0 || (mt[m]?.cyRev || 0) > 0);
+        if (hasMt) {
+          FISCAL_MONTHS.forEach(m => {
+            repMonthData[ec].months[m] += parseInt(mt[m]?.cyQty || 0);
+            repMonthData[ec].rev       += parseFloat(mt[m]?.cyRev || 0);
+          });
+        } else {
+          // Fallback: distribute flat columns evenly across 12 months
+          const qty = parseInt(r.target_quantity || 0);
+          const rev = parseFloat(r.target_revenue || 0);
+          FISCAL_MONTHS.forEach(m => { repMonthData[ec].months[m] += Math.round(qty / 12); });
+          repMonthData[ec].rev += rev;
+        }
+      }
+    }
+    result.forEach(z => z.abms.forEach(a => a.tbms.forEach(t =>
+      t.salesReps.forEach(r => {
+        const d = repMonthData[r.employeeCode] || { months: zeroMonths(), rev: 0 };
+        r.ownMonths  = d.months;
+        r.aopEntered = d.rev;
+      })
+    )));
+
+    // ── B) TBM ownMonths from ts_geography_targets (territory) ───────────
+    const tgtMonthData  = {}; // territory_code → { months, rev }
+    const tbmTerrCodes  = [...new Set(Object.values(tbmTerrLookup).filter(Boolean))];
+    if (tbmTerrCodes.length > 0) {
+      const tgtSelectParts = FISCAL_MONTHS.map((lc, i) =>
+        `SUM(${monthQtySql(MONTHS_CAP[i], lc)}) AS "${lc}"`
+      ).join(', ');
+
+      const tgtSql = `
+        SELECT territory_code,
+          ${tgtSelectParts},
+          SUM(COALESCE(target_revenue, 0)) AS total_rev
+        FROM aop.ts_geography_targets
+        WHERE fiscal_year_code = 'FY26_27'
+          AND geo_level = 'territory'
+          AND territory_code = ANY(?)
+        GROUP BY territory_code
+      `;
+      const tgtRes = await getKnex().raw(tgtSql, [tbmTerrCodes]);
+      for (const r of tgtRes.rows) {
+        tgtMonthData[r.territory_code] = {
+          months: FISCAL_MONTHS.reduce((a, m) => ({ ...a, [m]: parseInt(r[m] || 0) }), {}),
+          rev: parseFloat(r.total_rev || 0),
+        };
+      }
+    }
+    result.forEach(z => z.abms.forEach(a => a.tbms.forEach(t => {
+      const d = tgtMonthData[t.code] || { months: zeroMonths(), rev: 0 };
+      t.ownMonths  = d.months;
+      t.aopEntered = d.rev;
+    })));
+
+    // ── C) ABM ownMonths from ts_geography_targets (area) ────────────────
+    const agtMonthData = {}; // area_code → { months, rev }
+    const abmAreaCodes = [...new Set(Object.values(abmAreaLookup).filter(Boolean))];
+    if (abmAreaCodes.length > 0) {
+      const agtSelectParts = FISCAL_MONTHS.map((lc, i) =>
+        `SUM(${monthQtySql(MONTHS_CAP[i], lc)}) AS "${lc}"`
+      ).join(', ');
+
+      const agtSql = `
+        SELECT area_code,
+          ${agtSelectParts},
+          SUM(COALESCE(target_revenue, 0)) AS total_rev
+        FROM aop.ts_geography_targets
+        WHERE fiscal_year_code = 'FY26_27'
+          AND geo_level = 'area'
+          AND area_code = ANY(?)
+        GROUP BY area_code
+      `;
+      const agtRes = await getKnex().raw(agtSql, [abmAreaCodes]);
+      for (const r of agtRes.rows) {
+        agtMonthData[r.area_code] = {
+          months: FISCAL_MONTHS.reduce((a, m) => ({ ...a, [m]: parseInt(r[m] || 0) }), {}),
+          rev: parseFloat(r.total_rev || 0),
+        };
+      }
+    }
+    result.forEach(z => z.abms.forEach(a => {
+      const d = agtMonthData[a.code] || { months: zeroMonths(), rev: 0 };
+      a.ownMonths  = d.months;
+      a.aopEntered = d.rev;
+    }));
+
+    // ── D) ZBM ownMonths: aggregate from their ABMs ───────────────────────
+    result.forEach(z => {
+      const zbmMonths = zeroMonths();
+      let zbmRev = 0;
+      z.abms.forEach(a => {
+        FISCAL_MONTHS.forEach(m => { zbmMonths[m] += (a.ownMonths || {})[m] || 0; });
+        zbmRev += a.aopEntered || 0;
+      });
+      z.ownMonths  = zbmMonths;
+      z.aopEntered = zbmRev;
+    });
+
+    // ── end ownMonths population ──────────────────────────────────────────
 
     return result;
   },
@@ -457,30 +614,33 @@ const SalesHeadService = {
       let lyTargetValue   = parseFloat(assignment?.ly_target_value   || 0);
       let lyAchievedValue = parseFloat(assignment?.ly_achieved_value  || 0);
 
-      if (!lyTargetValue && prevFy) {
-        // In FY25_26, the ZBM was the assignee — query by assignee_code, not manager_code
-        const lyResult = await db('ts_yearly_target_assignments')
-          .where({ fiscal_year_code: prevFy, assignee_code: zbm.employee_code })
-          .sum({ totalRev: 'cy_target_value' })
-          .first();
-        lyTargetValue = parseFloat(lyResult?.totalRev) || 0;
+      if (!lyTargetValue || !lyAchievedValue) {
+        // Source LY values from ABM-level FY25_26 assignments — same data the ZBM dashboard shows.
+        // ZBM dashboard sums ly_target_value / ly_achieved_value across all ABMs under the ZBM.
+        // We must do the same here so Sales Head sees identical numbers to ZBM.
+        const abmCodes = await db('ts_auth_users')
+          .where({ reports_to: zbm.employee_code, is_active: true })
+          .pluck('employee_code');
 
-        if (!lyTargetValue && zbm.zone_code) {
-          const lyCommit = await db('ts_product_commitments')
-            .where({ fiscal_year_code: prevFy, zone_code: zbm.zone_code })
-            .sum({ totalRev: 'target_revenue' })
-            .first();
-          lyTargetValue = parseFloat(lyCommit?.totalRev) || 0;
+        if (abmCodes.length > 0) {
+          if (!lyTargetValue) {
+            const lyTgtRow = await db('ts_yearly_target_assignments')
+              .where({ fiscal_year_code: prevFy })
+              .whereIn('assignee_code', abmCodes)
+              .sum({ total: 'ly_target_value' })
+              .first();
+            lyTargetValue = parseFloat(lyTgtRow?.total || 0);
+          }
+
+          if (!lyAchievedValue) {
+            const lyAchRow = await db('ts_yearly_target_assignments')
+              .where({ fiscal_year_code: prevFy })
+              .whereIn('assignee_code', abmCodes)
+              .sum({ total: 'ly_achieved_value' })
+              .first();
+            lyAchievedValue = parseFloat(lyAchRow?.total || 0);
+          }
         }
-      }
-
-      if (!lyAchievedValue && prevFy) {
-        // In FY25_26, the ZBM was the assignee — query by assignee_code, not manager_code
-        const lyAch = await db('ts_yearly_target_assignments')
-          .where({ fiscal_year_code: prevFy, assignee_code: zbm.employee_code })
-          .sum({ totalAchRev: 'ly_achieved_value' })
-          .first();
-        lyAchievedValue = parseFloat(lyAch?.totalAchRev) || 0;
       }
 
       if (assignment && (lyTargetValue > 0 || lyAchievedValue > 0)) {
@@ -665,6 +825,431 @@ const SalesHeadService = {
       result.push({ zoneCode: z.zone_code, zoneName: z.zone_name, total: parseInt(total.count), approved: parseInt(approved.count), achievementRate: parseInt(total.count) > 0 ? Math.round((parseInt(approved.count) / parseInt(total.count)) * 100) : 0 });
     }
     return result;
+  },
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // getProductVisibility
+  //
+  // Returns persons[] at the given level with their product commitments.
+  // Optional filters: { zbm_id, abm_id, tbm_id, rep_id }
+  //   When a filter is set, only the hierarchy subtree under that node is
+  //   included in the result. Filters cascade correctly:
+  //     zbm_id on tbm level → resolve ZBM→ABMs→TBMs, return only those TBMs
+  //     abm_id on rep level → resolve ABM→TBMs→Reps, return only those reps
+  // ═══════════════════════════════════════════════════════════════════════
+  async getProductVisibility(level, filters = {}) {
+    const FISCAL_MONTHS = ['apr','may','jun','jul','aug','sep','oct','nov','dec','jan','feb','mar'];
+
+    // ── Resolve hierarchy filter: compute empCodesToInclude ─────────────
+    const { zbm_id: zbmId, abm_id: abmId, tbm_id: tbmId, rep_id: repId } = filters;
+
+    // Reusable helper — fetches direct report codes for a manager
+    const getDRCodes = async (managerCode) => {
+      const r = await getKnex().raw(
+        `SELECT employee_code FROM aop.ts_auth_users WHERE reports_to = ? AND is_active = true`,
+        [managerCode]
+      );
+      return r.rows.map(x => x.employee_code);
+    };
+
+    let empCodesToInclude = null; // null = no filter → return all
+
+    if (repId) {
+      // Specific rep selected — show only that rep
+      empCodesToInclude = [repId];
+    } else if (tbmId) {
+      if (level === 'rep') {
+        // Show all reps under this TBM
+        empCodesToInclude = await getDRCodes(tbmId);
+      } else {
+        // Show only this TBM
+        empCodesToInclude = [tbmId];
+      }
+    } else if (abmId) {
+      if (level === 'abm') {
+        empCodesToInclude = [abmId];
+      } else if (level === 'tbm') {
+        empCodesToInclude = await getDRCodes(abmId);
+      } else if (level === 'rep') {
+        const tbms = await getDRCodes(abmId);
+        if (!tbms.length) return [];
+        empCodesToInclude = (await Promise.all(tbms.map(getDRCodes))).flat();
+      }
+    } else if (zbmId) {
+      if (level === 'zbm') {
+        empCodesToInclude = [zbmId];
+      } else if (level === 'abm') {
+        empCodesToInclude = await getDRCodes(zbmId);
+      } else if (level === 'tbm') {
+        const abms = await getDRCodes(zbmId);
+        if (!abms.length) return [];
+        empCodesToInclude = (await Promise.all(abms.map(getDRCodes))).flat();
+      } else if (level === 'rep') {
+        const abms = await getDRCodes(zbmId);
+        if (!abms.length) return [];
+        const tbms = (await Promise.all(abms.map(getDRCodes))).flat();
+        if (!tbms.length) return [];
+        empCodesToInclude = (await Promise.all(tbms.map(getDRCodes))).flat();
+      }
+    }
+
+    // Early return if filter resolved to empty set
+    if (empCodesToInclude !== null && empCodesToInclude.length === 0) return [];
+
+    // Pre-build SQL fragments for emp code filtering (reused in CY + LY queries)
+    const empClause   = empCodesToInclude
+      ? `AND u.employee_code IN (${empCodesToInclude.map(() => '?').join(',')})`
+      : '';
+    const empBindings = empCodesToInclude || [];
+
+    // ── Helper: extract monthly qty from a monthly_targets JSONB cell ──────
+    // Handles both plain-number format {apr:12} and object format {apr:{cyQty:12}}
+    const extractQty = (mt, m, field = null) => {
+      const md = (mt || {})[m];
+      if (md == null) return 0;
+      if (typeof md === 'object') {
+        if (field) return Number(md[field] || 0);
+        return Number(md.cyQty || md.qty || 0);
+      }
+      return Number(md || 0);
+    };
+
+    // ── Helper: build empMap entry from a row + monthly extractor fn ───────
+    const pushProduct = (empMap, emp, personInfo, productCode, productName, cyMt, lyMt, flatCyQty, flatLyQty, categoryId = null, subcategory = null, subgroup = null) => {
+      if (!empMap[emp]) {
+        empMap[emp] = { ...personInfo, products: [] };
+      }
+      const cyMonths = {};
+      let cyTotal = 0;
+      for (const m of FISCAL_MONTHS) {
+        const q = extractQty(cyMt, m, null);
+        cyMonths[m] = q;
+        cyTotal    += q;
+      }
+      if (cyTotal === 0 && flatCyQty) {
+        const per = Math.round(flatCyQty / 12);
+        for (const m of FISCAL_MONTHS) cyMonths[m] = per;
+        cyTotal = Number(flatCyQty);
+      }
+      const lyMonths = {};
+      let lyTotal = 0;
+      for (const m of FISCAL_MONTHS) {
+        const q = extractQty(lyMt, m, null);
+        lyMonths[m] = q;
+        lyTotal    += q;
+      }
+      if (lyTotal === 0 && flatLyQty) {
+        const per = Math.round(flatLyQty / 12);
+        for (const m of FISCAL_MONTHS) lyMonths[m] = per;
+        lyTotal = Number(flatLyQty);
+      }
+      empMap[emp].products.push({ productCode, productName, categoryId, subcategory, subgroup, cyMonths, lyMonths, cyTotal, lyTotal });
+    };
+
+    // ════════════════════════════════════════════════════════════════════════
+    // ABM LEVEL — data lives in ts_geography_targets (geo_level='area'), NOT
+    // ts_product_commitments. Join via area_code to identify the ABM.
+    // ════════════════════════════════════════════════════════════════════════
+    if (level === 'abm') {
+      // CY: FY26_27 area targets
+      const abmCySql = `
+        SELECT DISTINCT ON (u.employee_code, gt.product_code)
+          u.employee_code,
+          u.full_name,
+          u.role              AS user_role,
+          u.zone_name,
+          u.area_name,
+          u.area_code,
+          gt.product_code,
+          gt.monthly_targets  AS cy_mt,
+          COALESCE(
+            NULLIF(TRIM(pm.product_subgroup),''),
+            NULLIF(TRIM(pm.product_name),''),
+            NULLIF(TRIM(pm.product_family),''),
+            NULLIF(TRIM(pm.product_group),''),
+            gt.product_code
+          ) AS product_display_name,
+          LOWER(TRIM(pm.product_category)) AS product_category,
+          pm.product_family                AS product_family,
+          pm.product_subgroup              AS product_subgroup
+        FROM aop.ts_geography_targets gt
+        JOIN aop.ts_auth_users u
+          ON u.area_code = gt.area_code AND u.is_active = true
+          AND LOWER(TRIM(u.role)) IN ('area business manager','abm','area_business_manager','area manager')
+        LEFT JOIN (
+          SELECT DISTINCT ON (productcode)
+            productcode, product_subgroup, product_name, product_family, product_group, product_category
+          FROM aop.product_master ORDER BY productcode
+        ) pm ON pm.productcode = gt.product_code
+        WHERE gt.fiscal_year_code = 'FY26_27'
+          AND gt.geo_level = 'area'
+          ${empClause}
+        ORDER BY u.employee_code, gt.product_code, gt.updated_at DESC
+      `;
+      const abmCyRes = await getKnex().raw(abmCySql, empBindings);
+      console.log(`[getProductVisibility] abm CY rows: ${abmCyRes.rows.length}`);
+
+      // LY: FY25_26 area targets
+      const abmLySql = `
+        SELECT DISTINCT ON (u.employee_code, gt.product_code)
+          u.employee_code,
+          gt.product_code,
+          gt.monthly_targets AS ly_mt
+        FROM aop.ts_geography_targets gt
+        JOIN aop.ts_auth_users u
+          ON u.area_code = gt.area_code AND u.is_active = true
+          AND LOWER(TRIM(u.role)) IN ('area business manager','abm','area_business_manager','area manager')
+        WHERE gt.fiscal_year_code = 'FY25_26'
+          AND gt.geo_level = 'area'
+          ${empClause}
+        ORDER BY u.employee_code, gt.product_code, gt.updated_at DESC
+      `;
+      const abmLyRes = await getKnex().raw(abmLySql, empBindings);
+
+      // LY lookup: empCode:productCode → monthly_targets object
+      const lyLookup = {};
+      for (const r of abmLyRes.rows) {
+        lyLookup[`${r.employee_code}:${r.product_code}`] = r.ly_mt || {};
+      }
+
+      const empMap = {};
+      for (const r of abmCyRes.rows) {
+        const lyMt = lyLookup[`${r.employee_code}:${r.product_code}`] || {};
+        pushProduct(
+          empMap, r.employee_code,
+          { employeeCode: r.employee_code, fullName: r.full_name, role: r.user_role,
+            zoneName: r.zone_name || null, areaName: r.area_name || null, territoryName: null },
+          r.product_code, r.product_display_name || r.product_code,
+          r.cy_mt, lyMt, null, null,
+          r.product_category || null, r.product_family || null, r.product_subgroup || null
+        );
+      }
+      return Object.values(empMap).filter(e => e.products.length > 0);
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // TBM LEVEL — data lives in ts_geography_targets (geo_level='territory')
+    // Join via territory_code to identify the TBM (mirrors ABM block above).
+    // ════════════════════════════════════════════════════════════════════════
+    if (level === 'tbm') {
+      // CY: FY26_27 territory targets
+      const tbmCySql = `
+        SELECT DISTINCT ON (u.employee_code, gt.product_code)
+          u.employee_code,
+          u.full_name,
+          u.role              AS user_role,
+          u.zone_name,
+          u.area_name,
+          u.territory_name,
+          gt.product_code,
+          gt.monthly_targets  AS cy_mt,
+          COALESCE(
+            NULLIF(TRIM(pm.product_subgroup),''),
+            NULLIF(TRIM(pm.product_name),''),
+            NULLIF(TRIM(pm.product_family),''),
+            NULLIF(TRIM(pm.product_group),''),
+            gt.product_code
+          ) AS product_display_name,
+          LOWER(TRIM(pm.product_category)) AS product_category,
+          pm.product_family                AS product_family,
+          pm.product_subgroup              AS product_subgroup
+        FROM aop.ts_geography_targets gt
+        JOIN aop.ts_auth_users u
+          ON u.territory_code = gt.territory_code AND u.is_active = true
+          AND LOWER(TRIM(u.role)) IN ('territory business manager','tbm','territory_business_manager','territory manager')
+        LEFT JOIN (
+          SELECT DISTINCT ON (productcode)
+            productcode, product_subgroup, product_name, product_family, product_group, product_category
+          FROM aop.product_master ORDER BY productcode
+        ) pm ON pm.productcode = gt.product_code
+        WHERE gt.fiscal_year_code = 'FY26_27'
+          AND gt.geo_level = 'territory'
+          ${empClause}
+        ORDER BY u.employee_code, gt.product_code, gt.updated_at DESC
+      `;
+      const tbmCyRes = await getKnex().raw(tbmCySql, empBindings);
+      console.log(`[getProductVisibility] tbm CY rows: ${tbmCyRes.rows.length}`);
+
+      // LY: FY25_26 territory targets
+      const tbmLySql = `
+        SELECT DISTINCT ON (u.employee_code, gt.product_code)
+          u.employee_code,
+          gt.product_code,
+          gt.monthly_targets AS ly_mt
+        FROM aop.ts_geography_targets gt
+        JOIN aop.ts_auth_users u
+          ON u.territory_code = gt.territory_code AND u.is_active = true
+          AND LOWER(TRIM(u.role)) IN ('territory business manager','tbm','territory_business_manager','territory manager')
+        WHERE gt.fiscal_year_code = 'FY25_26'
+          AND gt.geo_level = 'territory'
+          ${empClause}
+        ORDER BY u.employee_code, gt.product_code, gt.updated_at DESC
+      `;
+      const tbmLyRes = await getKnex().raw(tbmLySql, empBindings);
+
+      // LY lookup: empCode:productCode → monthly_targets object
+      const lyLookup = {};
+      for (const r of tbmLyRes.rows) {
+        lyLookup[`${r.employee_code}:${r.product_code}`] = r.ly_mt || {};
+      }
+
+      const empMap = {};
+      for (const r of tbmCyRes.rows) {
+        const lyMt = lyLookup[`${r.employee_code}:${r.product_code}`] || {};
+        pushProduct(
+          empMap, r.employee_code,
+          { employeeCode: r.employee_code, fullName: r.full_name, role: r.user_role,
+            zoneName: r.zone_name || null, areaName: r.area_name || null, territoryName: r.territory_name || null },
+          r.product_code, r.product_display_name || r.product_code,
+          r.cy_mt, lyMt, null, null,
+          r.product_category || null, r.product_family || null, r.product_subgroup || null
+        );
+      }
+      return Object.values(empMap).filter(e => e.products.length > 0);
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // ZBM / REP LEVELS — data lives in ts_product_commitments
+    // ════════════════════════════════════════════════════════════════════════
+    const LEVEL_ROLES = {
+      zbm: ['zonal business manager', 'zbm', 'zonal_business_manager', 'zonal manager'],
+      rep: ['sales representative', 'sales_representative', 'sales rep', 'sales_rep',
+            'at iol specialist', 'at iol manager',
+            'equipment specialist - diagnostics & lasers',
+            'equipment specialist - surgical systems',
+            'equipment manager - diagnostics & lasers',
+            'equipment manager - surgical systems'],
+    };
+    const roles = LEVEL_ROLES[level] || LEVEL_ROLES.rep;
+    const rolePlaceholders = roles.map(() => '?').join(', ');
+
+    // Build emp code filter fragment for WHERE clause
+    const pcEmpClause   = empCodesToInclude
+      ? `AND pc.employee_code IN (${empCodesToInclude.map(() => '?').join(',')})`
+      : '';
+    const pcEmpBindings = empCodesToInclude || [];
+
+    const cySql = `
+      SELECT DISTINCT ON (pc.employee_code, pc.product_code)
+        pc.employee_code,
+        pc.product_code,
+        pc.monthly_targets,
+        pc.target_quantity  AS flat_qty,
+        u.full_name,
+        u.role              AS user_role,
+        u.zone_name,
+        u.area_name,
+        u.territory_name,
+        COALESCE(
+          NULLIF(TRIM(pm.product_subgroup),''),
+          NULLIF(TRIM(pm.product_name),''),
+          NULLIF(TRIM(pm.product_family),''),
+          NULLIF(TRIM(pm.product_group),''),
+          pc.product_code
+        ) AS product_display_name,
+        LOWER(TRIM(pm.product_category)) AS product_category,
+        pm.product_family                AS product_family,
+        pm.product_subgroup              AS product_subgroup
+      FROM aop.ts_product_commitments pc
+      JOIN aop.ts_auth_users u
+        ON u.employee_code = pc.employee_code AND u.is_active = true
+      LEFT JOIN (
+        SELECT DISTINCT ON (productcode)
+          productcode, product_subgroup, product_name, product_family, product_group, product_category
+        FROM aop.product_master ORDER BY productcode
+      ) pm ON pm.productcode = pc.product_code
+      WHERE pc.fiscal_year_code = 'FY26_27'
+        AND LOWER(TRIM(u.role)) IN (${rolePlaceholders})
+        ${pcEmpClause}
+      ORDER BY pc.employee_code, pc.product_code, pc.updated_at DESC
+    `;
+    const cyRes = await getKnex().raw(cySql, [...roles, ...pcEmpBindings]);
+    console.log(`[getProductVisibility] level=${level} CY rows: ${cyRes.rows.length}`);
+
+    const lySql = `
+      SELECT DISTINCT ON (pc.employee_code, pc.product_code)
+        pc.employee_code,
+        pc.product_code,
+        pc.target_quantity  AS flat_qty,
+        pc.monthly_targets
+      FROM aop.ts_product_commitments pc
+      JOIN aop.ts_auth_users u
+        ON u.employee_code = pc.employee_code AND u.is_active = true
+      WHERE pc.fiscal_year_code = 'FY25_26'
+        AND LOWER(TRIM(u.role)) IN (${rolePlaceholders})
+        ${pcEmpClause}
+      ORDER BY pc.employee_code, pc.product_code, pc.updated_at DESC
+    `;
+    const lyRes = await getKnex().raw(lySql, [...roles, ...pcEmpBindings]);
+
+    // LY lookup: empCode:productCode → { apr..mar }
+    const lyLookup = {};
+    for (const r of lyRes.rows) {
+      const key = `${r.employee_code}:${r.product_code}`;
+      const mt  = r.monthly_targets || {};
+      let total = 0;
+      const months = {};
+      for (const m of FISCAL_MONTHS) {
+        const q = extractQty(mt, m, null);
+        months[m] = q;
+        total     += q;
+      }
+      if (total === 0 && r.flat_qty) {
+        const per = Math.round(r.flat_qty / 12);
+        for (const m of FISCAL_MONTHS) months[m] = per;
+      }
+      lyLookup[key] = months;
+    }
+
+    const empMap = {};
+    for (const r of cyRes.rows) {
+      const lyMt  = lyLookup[`${r.employee_code}:${r.product_code}`] || {};
+      // Convert the already-extracted lyLookup object into the format pushProduct expects
+      // by wrapping it so extractQty returns plain values correctly
+      const lyMtWrapped = Object.fromEntries(FISCAL_MONTHS.map(m => [m, lyMt[m] || 0]));
+      pushProduct(
+        empMap, r.employee_code,
+        { employeeCode: r.employee_code, fullName: r.full_name, role: r.user_role,
+          zoneName: r.zone_name || null, areaName: r.area_name || null,
+          territoryName: r.territory_name || null },
+        r.product_code, r.product_display_name || r.product_code,
+        r.monthly_targets, lyMtWrapped, r.flat_qty, null,
+        r.product_category || null, r.product_family || null, r.product_subgroup || null
+      );
+    }
+
+    return Object.values(empMap).filter(e => e.products.length > 0);
+  },
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // getHierarchyOptions
+  //
+  // Returns the direct reports of a given parent node.
+  // Used by the cascading dropdown system in SalesHeadProductVisibility.
+  //
+  // level='zbm'  → shEmployeeCode is the parent (SH's direct reports = ZBMs)
+  // level='abm'  → parentId is a ZBM's employee_code
+  // level='tbm'  → parentId is an ABM's employee_code
+  // level='rep'  → parentId is a TBM's employee_code
+  // ═══════════════════════════════════════════════════════════════════════
+  async getHierarchyOptions(shEmployeeCode, level, parentId) {
+    const managerCode = (!parentId || level === 'zbm') ? shEmployeeCode : parentId;
+    console.log(`[getHierarchyOptions] level=${level} managerCode=${managerCode}`);
+    const res = await getKnex().raw(
+      `SELECT employee_code, full_name, designation, zone_name, area_name, territory_name
+       FROM aop.ts_auth_users
+       WHERE reports_to = ? AND is_active = true
+       ORDER BY full_name`,
+      [managerCode]
+    );
+    return res.rows.map(r => ({
+      employeeCode:  r.employee_code,
+      fullName:      r.full_name,
+      designation:   r.designation,
+      zoneName:      r.zone_name,
+      areaName:      r.area_name,
+      territoryName: r.territory_name,
+    }));
   },
 };
 

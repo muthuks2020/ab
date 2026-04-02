@@ -356,7 +356,7 @@ const ABMService = {
       ? await db('ts_yearly_target_assignments')
           .whereIn('assignee_code', tbmCodes)
           .where({ fiscal_year_code: prevFy })
-          .select('assignee_code', 'cy_target_value', 'ly_target_value', 'ly_achieved_value', 'category_name')
+          .select('assignee_code', 'cy_target_value', 'ly_achieved_value', 'category_name')
       : [];
 
     // Final fallback: sum target_revenue from ts_product_commitments for FY25_26 per TBM
@@ -373,16 +373,42 @@ const ABMService = {
       lyCommitMap[r.employee_code] = parseFloat(r.lyTargetValue || 0);
     });
 
+    // 4th fallback: ts_product_commitments stores data at Sales Rep level, not TBM level.
+    // For any TBM still showing 0, aggregate FY25_26 commitments from their direct SR reports.
+    if (tbmCodes.length > 0) {
+      const srRows = await db('ts_auth_users')
+        .whereIn('reports_to', tbmCodes)
+        .where({ is_active: true })
+        .select('employee_code', 'reports_to');
+
+      if (srRows.length > 0) {
+        const allSrCodes = srRows.map((r) => r.employee_code);
+        const srCommits = await db('ts_product_commitments')
+          .whereIn('employee_code', allSrCodes)
+          .where({ fiscal_year_code: prevFy })
+          .groupBy('employee_code')
+          .select('employee_code')
+          .sum({ val: 'target_revenue' });
+
+        srCommits.forEach((row) => {
+          const val = parseFloat(row.val || 0);
+          const sr = srRows.find((s) => s.employee_code === row.employee_code);
+          if (sr && val > 0) {
+            lyCommitMap[sr.reports_to] = (lyCommitMap[sr.reports_to] || 0) + val;
+          }
+        });
+      }
+    }
+
     const members = tbmDirectReports.map((r) => {
       const cyRows = cyAssignments.filter((a) => a.assignee_code === r.employee_code);
       const lyRows = lyAssignments.filter((a) => a.assignee_code === r.employee_code);
 
       // Aggregate LY from cy rows first (they carry ly_target_value / ly_achieved_value)
-      // Fall back to prev-FY ly_target_value (cy_target_value is 0 on imported FY25_26 rows),
-      // then to ts_product_commitments FY25_26 sum as final safety net
+      // Fall back to prev-FY cy_target_value, then to ts_product_commitments FY25_26 data
       const lyTargetValue =
         cyRows.reduce((s, a) => s + parseFloat(a.ly_target_value || 0), 0) ||
-        lyRows.reduce((s, a) => s + parseFloat(a.ly_target_value || 0), 0) ||
+        lyRows.reduce((s, a) => s + parseFloat(a.cy_target_value || 0), 0) ||
         lyCommitMap[r.employee_code] || 0;
       const lyAchievedValue =
         cyRows.reduce((s, a) => s + parseFloat(a.ly_achieved_value || 0), 0) ||
@@ -619,38 +645,6 @@ const ABMService = {
       .whereIn('assignee_code',  memberIds)
       .update({ status: 'published', published_at: now, updated_at: now });
     return { success: true, publishedCount: updated };
-  },
-
-  // Saves the ABM's correction for a single month to ts_geography_targets
-  // WITHOUT changing status (submission stays 'submitted'). Called on-blur from
-  // the TBM Targets table so corrections are immediately persisted.
-  async saveCorrection(targetId, abmUser, { month, cyQty } = {}) {
-    if (!month || cyQty === undefined) {
-      throw Object.assign(new Error('month and cyQty are required.'), { status: 400 });
-    }
-    const target = await db('ts_geography_targets').where({ id: targetId }).first();
-    if (!target) throw Object.assign(new Error('Target not found.'), { status: 404 });
-
-    // Recompute cyRev on the backend using quota_price__c
-    const productRow = await db('product_master')
-      .where('productcode', target.product_code)
-      .select('quota_price__c')
-      .first();
-    const unitCost = productRow ? (Number(productRow.quota_price__c) || 0) : 0;
-
-    const numQty = Number(cyQty) || 0;
-    const updated = { ...(target.monthly_targets || {}) };
-    updated[month] = {
-      ...(updated[month] || {}),
-      cyQty: numQty,
-      cyRev: unitCost > 0 ? numQty * unitCost : (updated[month]?.cyRev || 0),
-    };
-
-    await db('ts_geography_targets').where({ id: targetId }).update({
-      monthly_targets: JSON.stringify(updated),
-      updated_at:      new Date(),
-    });
-    return { success: true, targetId, month, cyQty: numQty };
   },
 
   async getDashboardStats(abmEmployeeCode) {

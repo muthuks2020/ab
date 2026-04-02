@@ -158,32 +158,6 @@ const ABMAreaTargetsService = {
       const productCode = t.productCode || t.code;
       if (!productCode) continue;
 
-      // ── Look up quota price to compute cyRev server-side ────
-      // Frontend sends cyQty; cyRev must be cyQty × quota_price__c so that
-      // getAbmAreaRevMonths (used by summaryHead and summaryZBM) reads
-      // correct revenue values for the Sales Head / ZBM monthly columns.
-      const productRow = await db('product_master')
-        .where('productcode', productCode)
-        .select('quota_price__c')
-        .first();
-      const unitCost = productRow ? (Number(productRow.quota_price__c) || 0) : 0;
-
-      // Build monthly_targets with cyRev computed server-side
-      const mt = t.monthlyTargets || {};
-      const mtWithRev = {};
-      for (const m of MONTHS) {
-        const cell  = mt[m] || {};
-        const cyQty = Number(cell.cyQty || 0);
-        mtWithRev[m] = {
-          ...cell,
-          cyQty,
-          cyRev: unitCost > 0 ? cyQty * unitCost : Number(cell.cyRev || 0),
-        };
-      }
-
-      const totalQty = MONTHS.reduce((s, m) => s + (mtWithRev[m]?.cyQty || 0), 0);
-      const totalRev = MONTHS.reduce((s, m) => s + (mtWithRev[m]?.cyRev || 0), 0);
-
       const existing = await db('ts_geography_targets')
         .where({ fiscal_year_code: fy, geo_level: 'area', area_code: areaCode, product_code: productCode })
         .first();
@@ -194,9 +168,7 @@ const ABMAreaTargetsService = {
         await db('ts_geography_targets')
           .where({ id: existing.id })
           .update({
-            monthly_targets: JSON.stringify(mtWithRev),
-            target_quantity: totalQty,
-            target_revenue:  totalRev,
+            monthly_targets: JSON.stringify(t.monthlyTargets || {}),
             set_by_code:     abmUser.employeeCode,
             set_by_role:     abmUser.role,
             status:          newStatus,
@@ -214,9 +186,7 @@ const ABMAreaTargetsService = {
           territory_name:   null,
           product_code:     productCode,
           category_id:      t.categoryId || null,
-          monthly_targets:  JSON.stringify(mtWithRev),
-          target_quantity:  totalQty,
-          target_revenue:   totalRev,
+          monthly_targets:  JSON.stringify(t.monthlyTargets || {}),
           set_by_code:      abmUser.employeeCode,
           set_by_role:      abmUser.role,
           status:           'draft',

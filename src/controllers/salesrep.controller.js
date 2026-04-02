@@ -3,7 +3,7 @@ const { successResponse, errorResponse } = require('../utils/helpers');
 
 const SalesRepController = {
   async getProducts(req, res, next) {
-    try { res.json(await CommitmentService.getProducts(req.user.employeeCode, req.query.fy)); }
+    try { res.json(await CommitmentService.getProducts(req.user.employeeCode, req.query.fy, req.user.role)); }
     catch (err) { next(err); }
   },
   async updateMonthlyTarget(req, res, next) {

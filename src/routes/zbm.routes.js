@@ -2,6 +2,7 @@
 const express = require('express');
 const router = express.Router();
 const ZBMController = require('../controllers/zbm.controller');
+const SummaryZBMController = require('../controllers/summaryZBM.controller');
 const { authenticate } = require('../middleware/authenticate');
 const { authorize } = require('../middleware/authorize');
 const { validateBody } = require('../middleware/validate');
@@ -25,4 +26,10 @@ router.get('/unique-abms', ZBMController.getUniqueAbms);
 
 router.get('/sh-assigned-target', ZBMController.getSHAssignedTarget);
 router.get('/dashboard-stats', ZBMController.getDashboardStats);
+
+router.get('/summary-data',                 SummaryZBMController.getSummaryData);
+router.post('/summary-data/save-yearly',    SummaryZBMController.saveYearly);
+router.post('/summary-data/save-products',  SummaryZBMController.saveProducts);
+router.get('/product-visibility',           SummaryZBMController.getProductVisibility);
+
 module.exports = router;

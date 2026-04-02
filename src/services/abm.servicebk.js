@@ -90,62 +90,99 @@ const isSpecialistDesignation = (designation) =>
 const ABMService = {
 
   async getTbmSubmissions(abmEmployeeCode, filters = {}) {
+    // TBM territory targets live in ts_geography_targets (geo_level='territory')
+    // NOT in ts_product_commitments — that table holds individual sales-rep commitments
     const directReports = await getAbmDirectReports(abmEmployeeCode);
     const tbmCodes = directReports.map((r) => r.employee_code);
     if (tbmCodes.length === 0) return [];
-    const activeFy = filters.fy || await getActiveFY();
-    let query = db('ts_product_commitments AS pc')
-      .join('product_master AS pm', 'pm.productcode', 'pc.product_code')
-      .leftJoin('ts_auth_users AS u', 'u.employee_code', 'pc.employee_code')
-      .whereIn('pc.employee_code', tbmCodes)
-      .where('pc.fiscal_year_code', activeFy);
-    if (filters.status) { query = query.where('pc.status', filters.status); }
-    else { query = query.whereIn('pc.status', ['submitted', 'approved']); }
+    const activeFy = filters.fy || 'FY26_27';
+
+    let query = db('ts_geography_targets AS gt')
+      .join('product_master AS pm', 'pm.productcode', 'gt.product_code')
+      .leftJoin('ts_auth_users AS u', 'u.employee_code', 'gt.set_by_code')
+      .whereIn('gt.set_by_code', tbmCodes)
+      .where('gt.fiscal_year_code', activeFy)
+      .where('gt.geo_level', 'territory');
+
+    if (filters.status) { query = query.where('gt.status', filters.status); }
+    else { query = query.whereIn('gt.status', ['draft', 'submitted', 'approved']); }
+
     const rows = await query.select(
-      'pc.*', 'pm.product_name', 'pm.product_category', 'pm.quota_price__c AS unit_cost',
-      'u.full_name AS employee_name', 'u.role AS employee_role'
-    ).orderBy('u.full_name').orderBy('pm.product_name');
-    return rows.map(formatCommitment);
+      'gt.id', 'gt.fiscal_year_code', 'gt.geo_level',
+      'gt.territory_code', 'gt.territory_name',
+      'gt.area_code', 'gt.area_name',
+      'gt.zone_code', 'gt.zone_name',
+      'gt.product_code', 'gt.monthly_targets',
+      'gt.status', 'gt.set_by_code', 'gt.updated_at',
+      'pm.product_name', 'pm.product_category',
+      'pm.product_family', 'pm.product_group', 'pm.product_subgroup',
+      'pm.quota_price__c AS unit_cost',
+      'u.full_name AS employee_name',
+      'u.territory_name AS tbm_territory'
+    ).orderBy('u.full_name').orderBy('pm.product_family').orderBy('pm.product_name');
+
+    return rows.map((r) => ({
+      id:              r.id,
+      fiscalYearCode:  r.fiscal_year_code,
+      employeeCode:    r.set_by_code,
+      tbmId:           r.set_by_code,
+      tbmName:         r.employee_name || '—',
+      territory:       r.territory_name || r.tbm_territory || '',
+      territoryCode:   r.territory_code || '',
+      areaCode:        r.area_code || '',
+      zoneCode:        r.zone_code || '',
+      productCode:     r.product_code,
+      productName:     r.product_subgroup || r.product_name || r.product_code,
+      categoryId:      normalizeCat(r.product_category),
+      productCategory: r.product_category || null,
+      productFamily:   r.product_family  || null,
+      productGroup:    r.product_group   || null,
+      productSubgroup: r.product_subgroup || null,
+      unitCost:        r.unit_cost ? parseFloat(r.unit_cost) : null,
+      status:          r.status,
+      monthlyTargets:  r.monthly_targets || {},
+      updatedAt:       r.updated_at,
+    }));
   },
 
-  async approveTbm(commitmentId, abmUser, { comments = '', corrections = null } = {}) {
-    const commitment = await db('ts_product_commitments').where({ id: commitmentId }).first();
-    if (!commitment) throw Object.assign(new Error('Commitment not found.'), { status: 404 });
-    if (commitment.status !== 'submitted') throw Object.assign(new Error(`Can only approve 'submitted'. Current: '${commitment.status}'.`), { status: 400 });
-    const sr = await db('ts_auth_users').where({ employee_code: commitment.employee_code }).first();
-    if (!sr || sr.reports_to !== abmUser.employeeCode) throw Object.assign(new Error('This TBM does not report to you.'), { status: 403 });
-    const now = new Date(); let action = 'approved'; let originalValues = null;
+  async approveTbm(targetId, abmUser, { comments = '', corrections = null } = {}) {
+    // Approves a ts_geography_targets record (geo_level='territory')
+    const target = await db('ts_geography_targets').where({ id: targetId }).first();
+    if (!target) throw Object.assign(new Error('Target not found.'), { status: 404 });
+    const tbm = await db('ts_auth_users').where({ employee_code: target.set_by_code }).first();
+    if (!tbm || tbm.reports_to !== abmUser.employeeCode) throw Object.assign(new Error('This TBM does not report to you.'), { status: 403 });
+    const now = new Date(); let action = 'approved';
     if (corrections && Object.keys(corrections).length > 0) {
-      originalValues = { ...commitment.monthly_targets };
-      const updated = { ...commitment.monthly_targets };
-      for (const [month, values] of Object.entries(corrections)) { if (updated[month]) updated[month] = { ...updated[month], ...values }; }
-      await db('ts_product_commitments').where({ id: commitmentId }).update({ monthly_targets: JSON.stringify(updated) });
+      const updated = { ...(target.monthly_targets || {}) };
+      for (const [month, values] of Object.entries(corrections)) {
+        if (updated[month]) updated[month] = { ...updated[month], ...values };
+      }
+      await db('ts_geography_targets').where({ id: targetId }).update({ monthly_targets: JSON.stringify(updated) });
       action = 'corrected_and_approved';
     }
-    await db('ts_product_commitments').where({ id: commitmentId }).update({ status: 'approved', approved_at: now, approved_by_code: abmUser.employeeCode });
-    await db('ts_commitment_approvals').insert({ commitment_id: commitmentId, action, actor_code: abmUser.employeeCode, actor_role: abmUser.role, corrections: corrections ? JSON.stringify(corrections) : null, original_values: originalValues ? JSON.stringify(originalValues) : null, comments });
-    return { success: true, submissionId: commitmentId, action };
+    await db('ts_geography_targets').where({ id: targetId }).update({ status: 'approved', updated_at: now });
+    return { success: true, submissionId: targetId, action };
   },
 
-  async rejectTbm(commitmentId, abmUser, reason = '') {
-    const commitment = await db('ts_product_commitments').where({ id: commitmentId }).first();
-    if (!commitment) throw Object.assign(new Error('Commitment not found.'), { status: 404 });
-    if (commitment.status !== 'submitted') throw Object.assign(new Error(`Can only reject 'submitted'. Current: '${commitment.status}'.`), { status: 400 });
-    const sr = await db('ts_auth_users').where({ employee_code: commitment.employee_code }).first();
-    if (!sr || sr.reports_to !== abmUser.employeeCode) throw Object.assign(new Error('This TBM does not report to you.'), { status: 403 });
-    await db('ts_product_commitments').where({ id: commitmentId }).update({ status: 'draft', updated_at: new Date() });
-    await db('ts_commitment_approvals').insert({ commitment_id: commitmentId, action: 'rejected', actor_code: abmUser.employeeCode, actor_role: abmUser.role, comments: reason });
-    return { success: true, submissionId: commitmentId, action: 'rejected' };
+  async rejectTbm(targetId, abmUser, reason = '') {
+    const target = await db('ts_geography_targets').where({ id: targetId }).first();
+    if (!target) throw Object.assign(new Error('Target not found.'), { status: 404 });
+    const tbm = await db('ts_auth_users').where({ employee_code: target.set_by_code }).first();
+    if (!tbm || tbm.reports_to !== abmUser.employeeCode) throw Object.assign(new Error('This TBM does not report to you.'), { status: 403 });
+    await db('ts_geography_targets').where({ id: targetId }).update({ status: 'draft', updated_at: new Date() });
+    return { success: true, submissionId: targetId, action: 'rejected' };
   },
 
   async bulkApproveTbm(submissionIds, abmUser, comments = '') {
     const directReports = await getAbmDirectReports(abmUser.employeeCode);
     const tbmCodes = directReports.map((r) => r.employee_code);
-    const commitments = await db('ts_product_commitments').whereIn('id', submissionIds).where('status', 'submitted').whereIn('employee_code', tbmCodes);
-    if (commitments.length === 0) throw Object.assign(new Error('No eligible submissions.'), { status: 400 });
-    const ids = commitments.map((c) => c.id); const now = new Date();
-    await db('ts_product_commitments').whereIn('id', ids).update({ status: 'approved', approved_at: now, approved_by_code: abmUser.employeeCode });
-    await db('ts_commitment_approvals').insert(ids.map((id) => ({ commitment_id: id, action: 'bulk_approved', actor_code: abmUser.employeeCode, actor_role: abmUser.role, comments })));
+    const targets = await db('ts_geography_targets')
+      .whereIn('id', submissionIds)
+      .where('geo_level', 'territory')
+      .whereIn('set_by_code', tbmCodes);
+    if (targets.length === 0) throw Object.assign(new Error('No eligible submissions.'), { status: 400 });
+    const ids = targets.map((t) => t.id);
+    await db('ts_geography_targets').whereIn('id', ids).update({ status: 'approved', updated_at: new Date() });
     return { success: true, approvedCount: ids.length };
   },
 
@@ -260,7 +297,23 @@ const ABMService = {
 
   async submitAreaTargets(targetIds, abmUser) {
     const now = new Date();
-    const updated = await db('ts_geography_targets').whereIn('id', targetIds).where('status', 'draft').update({ status: 'published', published_at: now, updated_at: now });
+    const areaCode = abmUser.areaCode || abmUser.area_code;
+    const fy = 'FY26_27';
+
+    // Look up draft rows by area_code + fiscal_year (don't rely on frontend-supplied IDs)
+    const rows = await db('ts_geography_targets')
+      .where({ fiscal_year_code: fy, geo_level: 'area', area_code: areaCode, status: 'draft' })
+      .select('id');
+
+    if (!rows.length) {
+      return { success: true, submittedCount: 0, message: 'No draft area targets found to submit' };
+    }
+
+    const ids = rows.map((r) => r.id);
+    const updated = await db('ts_geography_targets')
+      .whereIn('id', ids)
+      .update({ status: 'published', published_at: now, updated_at: now });
+
     return { success: true, submittedCount: updated };
   },
 

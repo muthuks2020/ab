@@ -268,20 +268,12 @@ const SummaryHeadService = {
           };
         }));
 
-        /* ABM monthly & AOP Entered:
-           Own contribution = area-level entries in ts_geography_targets (geo_level='area').
-           Total displayed  = own area target + sum of every TBM's territory target below.
-           tbms is already built above, so we can walk it directly to accumulate. */
-        const { aopEntered: abmOwnAop, monthTotals: abmOwnMonths } =
+        /* ABM monthly & AOP Entered = ABM's own area-level entries in ts_geography_targets.
+           getAbmAreaRevMonths() reads geo_level='area' rows for this ABM's area_code,
+           summing cyRev per month. This reflects what the ABM actually entered, independent
+           of whether TBMs below have entered territory targets yet. */
+        const { aopEntered: abmAop, monthTotals: abmMonths } =
           await getAbmAreaRevMonths(abm.area_code);
-
-        // Roll up TBM territory targets into ABM totals
-        const abmTotalMonths = { ...abmOwnMonths };
-        let   abmTotalAop    = abmOwnAop;
-        tbms.forEach(t => {
-          FISCAL_MONTHS.forEach(m => { abmTotalMonths[m] += t.ownMonths[m] || 0; });
-          abmTotalAop += t.aopEntered || 0;
-        });
 
         return {
           employeeCode : abm.employee_code,
@@ -289,8 +281,8 @@ const SummaryHeadService = {
           designation  : abm.designation || 'ABM',
           territory    : abm.area_name || abm.zone_name || '—',
           role         : abm.role,
-          aopEntered   : abmTotalAop,
-          ownMonths    : abmTotalMonths,
+          aopEntered   : abmAop,
+          ownMonths    : abmMonths,
           ownProducts  : abmProducts,
           tbms,
         };

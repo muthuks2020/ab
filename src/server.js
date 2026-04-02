@@ -254,6 +254,7 @@ app.use(`${API_PREFIX}/abm`, abmSpecialistRoutes);
 app.use(`${API_PREFIX}/abm`, abmAreaTargetsRoutes);
 app.use(`${API_PREFIX}/abm`, abmRoutes);
 app.use(`${API_PREFIX}/zbm`, zbmRoutes);
+app.use(`${API_PREFIX}/zbm`, require('./routes/summaryZBM.routes'));
 app.use(`${API_PREFIX}/saleshead`, salesheadRoutes);
 app.use(`${API_PREFIX}/summary`,  require('./routes/summaryHead.routes'));
 app.use(`${API_PREFIX}/admin`,    adminRoutes);

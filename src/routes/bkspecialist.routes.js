@@ -7,7 +7,7 @@ const { validateBody } = require('../middleware/validate');
 const SpecialistController = require('../controllers/specialist.controller');
 const { saveSpecialistProductSchema, submitSpecialistMultipleSchema, saveAllSpecialistProductsSchema } = require('../validators/specialistSchemas');
 router.use(authenticate);
-router.use(authorize('at_iol_specialist', 'at_iol_manager', 'eq_spec_diagnostic', 'eq_mgr_diagnostic', 'eq_spec_surgical', 'eq_mgr_surgical'));
+router.use(authorize('at_iol_specialist', 'eq_spec_diagnostic', 'eq_spec_surgical'));
 router.get('/products', SpecialistController.getProducts);
 router.put('/products/:id/save', validateBody(saveSpecialistProductSchema), SpecialistController.saveProduct);
 router.post('/products/:id/submit', SpecialistController.submitProduct);

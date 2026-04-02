@@ -530,15 +530,29 @@ const ZBMService = {
       let targets;
 
       if (cyRows.length > 0) {
+        // Pre-compute total LY across all categories (used when CY row has no category_name).
+        // This is the case after ZBM saves/publishes a consolidated target — the saved row has
+        // category_name = null, so the per-category lookup abmLy['Other'] returns empty → 0.
+        const lyTotalTarget   = Object.values(abmLy).reduce((s, v) => s + (v.lyTarget   || 0), 0);
+        const lyTotalAchieved = Object.values(abmLy).reduce((s, v) => s + (v.lyAchieved || 0), 0);
+
         targets = cyRows.map((a) => {
           const cat = a.category_name || 'Other';
           const ly  = abmLy[cat] || {};
+
+          // When categoryName is null (consolidated row), use the summed LY total.
+          // When categoryName is a real category, use the per-category lookup as before.
+          const lyTarget   = !a.category_name && lyTotalTarget   ? lyTotalTarget
+                           : (ly.lyTarget   || parseFloat(a.ly_target_value   || 0));
+          const lyAchieved = !a.category_name && lyTotalAchieved ? lyTotalAchieved
+                           : (ly.lyAchieved || parseFloat(a.ly_achieved_value || 0));
+
           return {
             id:           a.id,
             categoryName: a.category_name,
             yearlyTarget: parseFloat(a.cy_target_value || 0),
-            lyTarget:     ly.lyTarget   || parseFloat(a.ly_target_value   || 0),
-            lyAchieved:   ly.lyAchieved || parseFloat(a.ly_achieved_value || 0),
+            lyTarget,
+            lyAchieved,
             status:       a.status,
             area:         a.area_name,
           };

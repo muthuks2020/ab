@@ -16,7 +16,7 @@ function getKnex() {
         password : process.env.DB_PASSWORD || 'aop_access',
         ssl      : { rejectUnauthorized: false },
       },
-      searchPath: [process.env.DB_SCHEMA || 'aop'],
+      searchPath: [process.env.DB_SCHEMA || 'aop_uat'],
       pool: { min: 2, max: 10 },
     });
   }

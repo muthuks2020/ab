@@ -20,5 +20,20 @@ module.exports = {
   async getAnalyticsDistribution(req, res, next) { try { res.json(await SalesHeadService.getAnalyticsDistribution(req.query)); } catch (err) { next(err); } },
   async getAnalyticsComparison(req, res, next) { try { res.json(await SalesHeadService.getAnalyticsComparison(req.query)); } catch (err) { next(err); } },
   async getAnalyticsAchievement(req, res, next) { try { res.json(await SalesHeadService.getAnalyticsAchievement(req.query)); } catch (err) { next(err); } },
-  async getProductVisibility(req, res, next) { try { res.json(await SalesHeadService.getProductVisibility(req.query.level || 'zbm')); } catch (err) { next(err); } },
+
+  // Updated: passes all query params as filters (zbm_id, abm_id, tbm_id, rep_id)
+  async getProductVisibility(req, res, next) {
+    try {
+      const { level = 'zbm', ...filters } = req.query;
+      res.json(await SalesHeadService.getProductVisibility(level, filters));
+    } catch (err) { next(err); }
+  },
+
+  // New: returns direct reports at a given level for cascading dropdowns
+  async getHierarchyOptions(req, res, next) {
+    try {
+      const { level = 'zbm', parent_id = null } = req.query;
+      res.json(await SalesHeadService.getHierarchyOptions(req.user.employeeCode, level, parent_id));
+    } catch (err) { next(err); }
+  },
 };

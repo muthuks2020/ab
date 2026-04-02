@@ -1,7 +1,6 @@
 const express = require('express');
 const router = express.Router();
 const TBMController = require('../controllers/tbm.controller');
-const SummaryTBMController = require('../controllers/summaryTBM.controller');
 const { authenticate } = require('../middleware/authenticate');
 const { authorize } = require('../middleware/authorize');
 const { validateBody } = require('../middleware/validate');
@@ -38,9 +37,4 @@ router.post('/team-yearly-targets/save', TBMController.saveYearlyTargets);
 
 router.put('/territory-targets/:id/save', TBMController.saveSingleTerritoryTarget);
 router.put('/individual-targets/:id/save', TBMController.saveSingleIndividualTarget);
-
-router.get('/summary-data',                  SummaryTBMController.getSummaryData);
-router.post('/summary-data/save-yearly',     SummaryTBMController.saveYearly);
-router.post('/summary-data/save-products',   SummaryTBMController.saveProducts);
-
 module.exports = router;

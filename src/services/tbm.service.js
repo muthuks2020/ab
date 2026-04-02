@@ -322,17 +322,49 @@ const TBMService = {
       });
     }
 
-    // Fetch TBM's own yearly target assigned by ABM
-    const ownAssignment = await db('ts_yearly_target_assignments')
+    // Fetch TBM's own yearly target — SUM across all rows (multiple rows possible per category/manager)
+    // Mirrors exactly how ABM computes lyAchievedValue in getTeamYearlyTargets
+    const cyAggRow = await db('ts_yearly_target_assignments')
       .where({ assignee_code: tbmEmployeeCode, fiscal_year_code: 'FY26_27' })
+      .sum({ cyTargetValueSum: 'cy_target_value', lyTargetValueSum: 'ly_target_value', lyAchievedValueSum: 'ly_achieved_value' })
       .first();
-    const cyTargetValue = ownAssignment ? parseFloat(ownAssignment.cy_target_value) || 0 : 0;
+    const cyTargetValue = parseFloat(cyAggRow?.cyTargetValueSum) || 0;
+    // LY Target — 3-step fallback (same chain used in ABM getDashboardStats)
+    // Step 1: ly_target_value on the FY26_27 assignment row
+    let lyTargetValue = parseFloat(cyAggRow?.lyTargetValueSum) || 0;
+    // Step 2: cy_target_value on the FY25_26 assignment row
+    if (!lyTargetValue) {
+      const lyTgtRow = await db('ts_yearly_target_assignments')
+        .where({ assignee_code: tbmEmployeeCode, fiscal_year_code: 'FY25_26' })
+        .sum({ lyTargetValueSum: 'cy_target_value' })
+        .first();
+      lyTargetValue = parseFloat(lyTgtRow?.lyTargetValueSum) || 0;
+    }
+    // Step 3: sum target_revenue from ts_product_commitments for FY25_26
+    if (!lyTargetValue) {
+      const commitRow = await db('ts_product_commitments')
+        .where({ employee_code: tbmEmployeeCode, fiscal_year_code: 'FY25_26' })
+        .sum('target_revenue as total')
+        .first();
+      lyTargetValue = parseFloat(commitRow?.total || 0);
+    }
+    // Fallback: if FY26_27 rows have no ly_achieved_value yet, sum from FY25_26 rows
+    let lyAchievedValue = parseFloat(cyAggRow?.lyAchievedValueSum) || 0;
+    if (!lyAchievedValue) {
+      const lyAggRow = await db('ts_yearly_target_assignments')
+        .where({ assignee_code: tbmEmployeeCode, fiscal_year_code: 'FY25_26' })
+        .sum({ lyAchievedValueSum: 'ly_achieved_value' })
+        .first();
+      lyAchievedValue = parseFloat(lyAggRow?.lyAchievedValueSum) || 0;
+    }
 
     return {
       products: Object.values(productMap).sort((a, b) =>
         a.categoryId.localeCompare(b.categoryId) || a.name.localeCompare(b.name)
       ),
       cyTargetValue,
+      lyTargetValue,
+      lyAchievedValue,
     };
   },
 
